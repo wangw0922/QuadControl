@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      - name: Validate workspace metadata
+        run: cargo metadata --no-deps --format-version 1
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+  apple:
+    name: Apple
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Print Apple toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Describe Swift package
+        run: swift package describe
+
+      - name: Build Swift package
+        run: swift build
+
+      - name: Run Swift package tests
+        run: swift test --enable-xctest
+
+      - name: Verify Swift tests were discovered
+        run: |
+          set -o pipefail
+          swift test list --skip-build --enable-xctest | grep -q 'testStrictTokenAndFrameBounds'
+
+      - name: Run diagnostic self-test
+        run: swift run QuadControlSelfTest
+
+      - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate and build iOS project for testing
+        working-directory: apps/ios
+        run: |
+          xcodegen generate --spec project.yml
+          xcodebuild \
+            -project QuadControlIOS.xcodeproj \
+            -scheme QuadControlIOS \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing
