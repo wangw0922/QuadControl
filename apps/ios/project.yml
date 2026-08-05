@@ -1,0 +1,45 @@
+name: QuadControlIOS
+# Source manifest only. Generate with XcodeGen on a Mac with full Xcode; this
+# repository does not include or claim to have generated an .xcodeproj.
+options:
+  minimumXcodeGenVersion: 2.38.0
+packages:
+  QuadControl:
+    path: ../..
+targets:
+  QuadControlIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.quadcontrol.diagnostic
+        INFOPLIST_FILE: Sources/Info.plist
+    dependencies:
+      - package: QuadControl
+        product: QuadControlDiagnosticProtocol
+      - package: QuadControl
+        product: QuadControlDiagnosticTransport
+  QuadControlIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.quadcontrol.diagnostic.tests
+    dependencies:
+      - target: QuadControlIOS
+schemes:
+  QuadControlIOS:
+    build:
+      targets:
+        QuadControlIOS: all
+        QuadControlIOSTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - QuadControlIOSTests

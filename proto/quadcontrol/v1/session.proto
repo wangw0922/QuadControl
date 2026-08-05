@@ -1,0 +1,45 @@
+syntax = "proto3";
+package quadcontrol.v1;
+
+// M0 source schema only. Generated code is intentionally not part of this workspace.
+message CapabilityReport {
+  string platform = 1;
+  repeated string capabilities = 2;
+}
+
+message SessionEnd {
+  string session_id = 1;
+  string reason = 2;
+}
+
+// Apple M0 diagnostic wire contract. The Swift adapter serializes these logical
+// messages as Codable JSON inside a 4-byte big-endian length-delimited frame.
+// JSON is never authenticated directly: proofs and MACs cover the canonical
+// binary transcripts specified in docs/PROTOCOL.md.
+message DiagnosticEnvelope {
+  uint32 protocol_version = 1; // Must be 1.
+  string type = 2;
+  bytes connection_id = 3;     // 16 bytes; temporary and log-safe identifier.
+  uint64 sequence = 4;         // Strictly increasing after authentication.
+  bytes payload = 5;
+  bytes mac = 6;               // 32 bytes for authenticated messages.
+}
+
+message DiagnosticHello {
+  bytes client_nonce = 1; // exactly 32 bytes
+}
+
+message DiagnosticChallenge {
+  bytes server_nonce = 1; // exactly 32 bytes
+  bytes challenge_id = 2; // exactly 16 bytes
+  bytes server_id = 3;    // exactly 16 bytes
+}
+
+message DiagnosticClientProof { bytes proof = 1; } // exactly 32 bytes
+message DiagnosticServerFinished {
+  bytes session_id = 1; // exactly 16 bytes
+  bytes proof = 2;      // exactly 32 bytes
+}
+message DiagnosticHeartbeat { string status = 1; } // non-sensitive only
+message DiagnosticAck { string status = 1; }
+message DiagnosticError { string code = 1; }

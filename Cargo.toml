@@ -1,0 +1,12 @@
+[workspace]
+members = [
+  "crates/core", "crates/protocol", "crates/transport", "crates/crypto",
+  "crates/media", "crates/pairing", "crates/diagnostics", "crates/ffi",
+  "agents/android-shell/adb-probe",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+version = "0.1.0"

@@ -1,0 +1,11 @@
+/target/
+/.build/
+/.swiftpm/
+/apps/ios/QuadControlIOS.xcodeproj/
+DerivedData/
+**/xcuserdata/
+*.xcuserstate
+.DS_Store
+*.swp
+.idea/
+.vscode/
