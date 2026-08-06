@@ -38,6 +38,7 @@
 | 13. iPhone SE 3 真机验证 | complete | 个人 Team 签名安装，真实 Wi-Fi LAN 连接：handshake/authenticated/heartbeat/断开 |
 | 14. 四端 UI 简体中文 | complete (iOS+listener) / pending (其余三端) | iOS 全界面与权限弹窗、listener token 段跟随系统语言；Windows/macOS/Android UI 尚不存在，要求已写入 PRODUCT_REQUIREMENTS |
 | 15. 扫码配对 | complete | `.proto` 先定义载荷；Mac CoreImage 终端二维码 + 地址解析；iOS 相机扫码，真机验证通过 |
+| 16. M0：macOS 蓝牙 HID 能力检测 | complete (只读) / blocked (外设角色) | `QuadControlMacHIDProbe` 报告控制器 HID 支持与三个外设角色 API 均存在；`can_act_as_hid_peripheral` 恒为 `unknown`，需用户在场的主动实验 |
 
 ## 范围约束
 

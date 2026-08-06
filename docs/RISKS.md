@@ -1,6 +1,9 @@
 # Risks
 
 - iOS Screen Curtain + ReplayKit and software HID are P0 experiments and blocked until physical-device tests.
+- macOS carries the HID profile and the peripheral-role APIs, but the peripheral
+  role itself is unproven. Do not plan Mac→iPhone HID control on API presence
+  alone; it needs the active experiment in `MACOS_HID_FEASIBILITY.md`.
 - Android transport classification uses explicit USB metadata or recognizable TCP/mDNS serial forms and remains a diagnostic heuristic; it does not authorize control.
 - Invoking adb can start its local server; M0 does not persist device serials or network addresses.
 - Platform host builds require toolchains not bundled by this repository.

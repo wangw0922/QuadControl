@@ -79,3 +79,13 @@
 - **CLI 进程没有 app bundle，CFBundle 的 `Bundle.module` 字符串查找不走用户语言**，直接落到 development region。`Bundle.preferredLocalizations(from:forPreferences:)` 显式传入 `Locale.preferredLanguages` 才正确匹配；listener 因此自行解析最佳 `.lproj`。
 - iOS 的 status 原本是硬编码英文 String，测试直接断言英文文案。改成 `ConnectionStatus` 枚举后文案与断言解耦，并加了「每个 case 都有非空且不等于原始 key 的译文」这条断言，漏翻会被测试抓到。
 - pty 读到的日志行尾带 `\r`，直接 `grep` 取 token 会多一个字符导致长度 44、粘贴校验失败；自动化取值必须先 `tr -d '\r'`。
+
+## 2026-08-06 macOS 蓝牙 HID 能力检测
+
+- 关键区分：macOS 默认是 HID **host**（接受键盘鼠标），而从 Mac 控制 iPhone 需要的是 HID **peripheral**（把 Mac 伪装成键盘）。这是同一 profile 的相反两端，支持其一不能推出支持另一。控制器 `Supported services` 里的 `HID` 只证明射频支持该 profile。
+- 外设角色需要三件事：发布带 HID service class 的 SDP 记录、接受 PSM 0x11（control）与 0x13（interrupt）的入站 L2CAP、用完撤销记录。
+- 实测这三个 API 在 macOS 26.5 SDK 中都存在且**没有弃用标记**：`publishedServiceRecordWithDictionary:`、`removeServiceRecord`、`registerForChannelOpenNotifications:selector:withPSM:direction:`。
+- 但符号存在远不足以下结论。read-only 测不出来的有：未签名/ad-hoc 签名进程是否被允许发布 HID SDP 记录、macOS 是否会把 HID PSM 交给第三方进程、iPhone 是否愿意配对、配对能否熬过睡眠与重连。因此 `can_act_as_hid_peripheral` 恒为 `unknown`，并加测试守护防止以后有人把它改成基于 API 存在性的 `yes`。
+- 探测器加载 IOBluetooth 用 `dlopen` 而非链接框架，只做运行时 introspection，不调用任何 API，因此不触发 TCC 权限提示、不改动蓝牙状态。
+- 框架未加载时 API 可用性报 `unknown` 而非 `no`——运行时答不上来不等于 API 不存在。这与 ADB probe 拒绝把「测不到」写成布尔值是同一条原则。
+- `system_profiler SPBluetoothDataType -json` 的结构：`SPBluetoothDataType[0].controller_properties`，开关量用 `attrib_on`/`attrib_off`，支持服务是 `0x392039 < HFP AVRCP A2DP HID ... >` 这种带尖括号的字符串，需要单独解析。

@@ -26,6 +26,12 @@ UI is localized for Simplified Chinese and English: the iOS app and the macOS
 listener's one-time-token block follow the system language, while stderr log
 lines stay English because docs and tests match on them.
 
+`QuadControlMacHIDProbe` covers the M0 "macOS Bluetooth HID" item as far as
+read-only observation allows: the controller supports the HID profile and all
+three peripheral-role APIs exist, but whether macOS will let a process act as a
+HID *peripheral* is reported `unknown` and stays **Blocked** pending an active,
+user-present experiment. See [macOS HID feasibility](MACOS_HID_FEASIBILITY.md).
+
 Rust remains **Blocked** locally where Cargo is unavailable; GitHub Actions
 covers `cargo metadata`, Clippy, and workspace tests. Android real-device
 behavior is **Blocked** without `adb` and a device.

@@ -72,3 +72,14 @@
 - 扫码配对：`session.proto` 先定义 `DiagnosticPairingPayload`，Mac 用 CoreImage 在终端渲染二维码并解析本机私网地址，iOS 加相机扫码并复用私网校验与 token 解码路径。
 - **扫码配对真机验证通过**：handshake → authenticated → heartbeat 1-4。
 - 测试增至：self-test 62 项断言、iOS 9 项 XCTest（含四种恶意二维码拒绝场景）、Swift package 4 项 XCTest。
+- 简体中文与扫码配对经 PR #3 合并到 `main`（squash `07ddc30`），CI 双绿。
+
+## 2026-08-06 M0：macOS 蓝牙 HID 能力检测
+
+- 新增 `QuadControlHIDProbe` 库 + `QuadControlMacHIDProbe` CLI，结构对齐 Rust ADB probe：解析与执行解耦，可无硬件单测。
+- 保持被动：只跑 `system_profiler SPBluetoothDataType -json` 一条只读命令（15 秒超时、1 MiB 输出上限），其余仅做 Objective-C 运行时的类/选择器存在性检查，不发布 SDP 记录、不开通道、不配对。
+- 本机实测结果：macOS 26.5.1 / BCM_4387 控制器已上电，支持服务含 HID；`IOBluetooth` 可加载；三个外设角色 API（发布 SDP 记录、撤销记录、注册 PSM 0x11/0x13 入站 L2CAP）在 26.5 SDK 中均存在且无弃用标记。
+- `can_act_as_hid_peripheral` 恒为 `unknown` 并有测试守护——控制器支持 HID 只证明射频支持该 profile，不等于本进程可担任外设角色。
+- 不报告控制器蓝牙地址：稳定硬件标识符，本诊断不需要，与 ADB probe 不持久化设备序列号一致。
+- 已输出 `docs/MACOS_HID_FEASIBILITY.md`，写明仍需一次用户在场的主动实验（发布记录 → 让 iPhone 尝试配对 → 发一个 HID report → 撤销记录并还原可发现状态）。
+- 测试增至 19 项 Swift package XCTest（4 协议 + 15 HID probe）。

@@ -9,7 +9,9 @@ let package = Package(
         .library(name: "QuadControlDiagnosticProtocol", targets: ["QuadControlDiagnosticProtocol"]),
         .library(name: "QuadControlDiagnosticTransport", targets: ["QuadControlDiagnosticTransport"]),
         .library(name: "QuadControlDiagnosticServer", targets: ["QuadControlDiagnosticServer"]),
+        .library(name: "QuadControlHIDProbe", targets: ["QuadControlHIDProbe"]),
         .executable(name: "QuadControlMacListener", targets: ["QuadControlMacListener"]),
+        .executable(name: "QuadControlMacHIDProbe", targets: ["QuadControlMacHIDProbe"]),
         .executable(name: "QuadControlSelfTest", targets: ["QuadControlSelfTest"])
     ],
     targets: [
@@ -40,6 +42,20 @@ let package = Package(
                 .copy("Resources/en.lproj"),
                 .copy("Resources/zh-Hans.lproj")
             ]
+        ),
+        .target(
+            name: "QuadControlHIDProbe",
+            path: "apple/Sources/QuadControlHIDProbe"
+        ),
+        .executableTarget(
+            name: "QuadControlMacHIDProbe",
+            dependencies: ["QuadControlHIDProbe"],
+            path: "apple/Sources/QuadControlMacHIDProbe"
+        ),
+        .testTarget(
+            name: "QuadControlHIDProbeTests",
+            dependencies: ["QuadControlHIDProbe"],
+            path: "apple/Tests/QuadControlHIDProbeTests"
         ),
         .executableTarget(
             name: "QuadControlSelfTest",

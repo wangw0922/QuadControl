@@ -53,7 +53,8 @@ enum InterfaceAddress {
                 0,
                 NI_NUMERICHOST
             ) == 0 else { continue }
-            return String(cString: host)
+            let bytes = host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+            return String(decoding: bytes, as: UTF8.self)
         }
         return nil
     }

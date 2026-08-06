@@ -28,3 +28,9 @@
   language matching; each `.lproj` is declared with `.copy` instead.
 - A CLI has no application bundle, so `Bundle.module` string lookup ignores the
   user's languages. The listener resolves the best-matching `.lproj` explicitly.
+- The macOS HID probe stays passive like the ADB probe: one whitelisted read-only
+  command plus Objective-C runtime introspection. It never publishes an SDP
+  record, because doing so mutates system Bluetooth state.
+- `can_act_as_hid_peripheral` is hardcoded to `unknown` and covered by a test.
+  A supported HID profile and present APIs must never be reported as "this Mac
+  can act as a keyboard".

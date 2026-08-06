@@ -9,4 +9,7 @@ and the client session, `QuadControlDiagnosticServer` owns the listener and
 admission control, and `QuadControlMacListener` is a visible local diagnostic
 host. The iOS SwiftUI
 root owns a single `ConnectionModel`; it reuses shared products rather than
-copying frames, authentication, or limits.
+copying frames, authentication, or limits. `QuadControlHIDProbe` is an
+independent read-only capability probe with a thin `QuadControlMacHIDProbe` CLI,
+structured like the Rust ADB probe: parsing is separated from execution so it can
+be tested without hardware.
