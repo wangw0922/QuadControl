@@ -1,0 +1,10 @@
+/* Shown once on /dev/tty when the listener becomes ready. Log lines written to
+   stderr stay untranslated because they are machine-readable identifiers. */
+"listener.ready.title" = "QuadControl 诊断监听端已就绪";
+"listener.ready.host" = "地址：%@";
+"listener.ready.port" = "端口：%@";
+"listener.ready.token_caption" = "临时 token（仅显示一次，180 秒后过期）：";
+"listener.ready.scope" = "不涉及屏幕、输入、剪贴板、文件、中继或无人值守访问。";
+"listener.ready.warning" = "终端回滚记录和截图都可能泄露此 token。按 Ctrl-C 停止。";
+"listener.host.unresolved" = "无法解析所选接口地址，请执行 `ipconfig getifaddr en0` 自行查看";
+"listener.ready.qr_caption" = "也可以直接用 app 扫描下面的二维码，不必手动输入 token：";

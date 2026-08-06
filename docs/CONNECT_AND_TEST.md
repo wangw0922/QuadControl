@@ -90,13 +90,28 @@ ipconfig getifaddr en0
 swift run QuadControlMacListener --lan --interface wifi --port 47100
 ```
 
-有线网络改用 `--interface wired`。程序会在 `/dev/tty` 显示一次实际端口和 43 字符临时 token；token 180 秒过期。非交互环境会直接拒绝启动，以免 token 被 stdout 重定向保存。
+有线网络改用 `--interface wired`。程序会在 `/dev/tty` 显示一次**实际的私网地址**、端口、43 字符临时 token 和一个包含这三项的二维码；token 180 秒过期。非交互环境会直接拒绝启动，以免 token 被 stdout 重定向保存。
+
+界面语言跟随系统：中文系统显示中文。stderr 的日志行（`handshake`、`authenticated`、`heartbeat N`）固定英文，它们是给排查和测试匹配用的标识。
 
 不要把 token 放进命令行、环境变量、文件、URL、剪贴板、聊天、日志或截图。监听端不接受公网 peer，客户端也只接受数字形式的 loopback、RFC1918、ULA 或 link-local 地址；不支持域名、VPN、NAT 穿透、Bonjour 或 relay。
 
 ## 5. 在 iPhone 发起连接
 
-在 `QuadControl Diagnostic` 中手动输入：
+### 推荐：扫码
+
+listener 就绪时会在终端直接显示一个二维码，里面是地址、端口和 token。在 app 里点
+「扫描配对码」，对准终端上的二维码即可，不用手输 43 位 token。首次会请求相机权限。
+
+二维码必须在**真正的终端**里看 —— 它用 ANSI 背景色保证黑白对比，重定向到文件或
+贴进聊天窗口会丢掉颜色、可能反色导致扫不出来。
+
+扫到的内容按不可信输入处理：地址仍要通过私网校验（公网地址、域名一律拒绝），token
+仍要通过同样的解码校验。所以别人给的二维码不可能把你的手机指向公网监听端。
+
+### 手动输入
+
+也可以在 `QuadControl` 中手动输入：
 
 - `Private host`：上一步得到的 Mac 数字私网 IP，例如 `192.168.1.23`；
 - `Port`：默认 `47100`；

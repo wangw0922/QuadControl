@@ -43,3 +43,16 @@ message DiagnosticServerFinished {
 message DiagnosticHeartbeat { string status = 1; } // non-sensitive only
 message DiagnosticAck { string status = 1; }
 message DiagnosticError { string code = 1; }
+
+// Shown by the Mac listener as an on-screen QR code so the phone does not have to
+// type a 43-character token. It is scanned straight into the client's existing
+// validation path: never parsed as a URL, never opened by the system, never
+// persisted, and the host is still checked against the private-address policy.
+// The QR carries the token, so it inherits the same shoulder-surfing and
+// screenshot exposure already documented for terminal token display.
+message DiagnosticPairingPayload {
+  uint32 protocol_version = 1; // Must be 1.
+  string host = 2;             // Numeric loopback/private/link-local literal only.
+  uint32 port = 3;             // 1-65535.
+  string token = 4;            // 43-character base64url of the 32-byte token.
+}

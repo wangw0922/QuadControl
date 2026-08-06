@@ -83,6 +83,30 @@ private func shortID(_ id: UUID) -> String {
     String(id.uuidString.prefix(8))
 }
 
+/// A command-line tool has no application bundle, so CFBundle resolves `Bundle.module`
+/// strings against the development region rather than the user's languages — every
+/// string silently comes back English. Resolving the best-matching `.lproj` explicitly
+/// makes the token block follow the system language.
+private let localizationBundle: Bundle = {
+    let preferred = Bundle.preferredLocalizations(
+        from: Bundle.module.localizations,
+        forPreferences: Locale.preferredLanguages
+    )
+    guard let code = preferred.first,
+          let path = Bundle.module.path(forResource: code, ofType: "lproj"),
+          let bundle = Bundle(path: path) else {
+        return .module
+    }
+    return bundle
+}()
+
+/// Only the one-time token block shown on `/dev/tty` is localized. Every stderr log
+/// line stays in English because those are machine-readable event identifiers that
+/// the troubleshooting docs and tests match on.
+private func localized(_ key: String) -> String {
+    localizationBundle.localizedString(forKey: key, value: nil, table: nil)
+}
+
 guard let terminal = TerminalWriter() else {
     fputs("refusing launch without an interactive terminal for one-time token display\n", stderr)
     exit(64)
@@ -107,22 +131,39 @@ do {
     try server.start { event in
         switch event {
         case let .ready(port):
-            let host = options.configuration.mode == .loopback
-                ? "127.0.0.1"
-                : "private address of the selected interface"
+            let resolvedHost: String?
+            switch options.configuration.mode {
+            case .loopback: resolvedHost = "127.0.0.1"
+            case .lanWiFi: resolvedHost = InterfaceAddress.privateIPv4(for: .wifi)
+            case .lanWired: resolvedHost = InterfaceAddress.privateIPv4(for: .wiredEthernet)
+            }
             do {
                 let displayToken = try PairingToken.encode(token.value)
-                try terminal.write(
-                    """
-                    QuadControl diagnostic listener ready
-                    Host: \(host)
-                    Port: \(port)
-                    Temporary token (shown once; expires in 180 seconds):
-                    \(displayToken)
-                    No screen, input, clipboard, files, relay, or unattended access.
-                    Terminal scrollback and screenshots can expose this token. Ctrl-C stops.
-                    """
-                )
+                var block = """
+                \(localized("listener.ready.title"))
+                \(String(format: localized("listener.ready.host"), resolvedHost ?? localized("listener.host.unresolved")))
+                \(String(format: localized("listener.ready.port"), String(port)))
+                \(localized("listener.ready.token_caption"))
+                \(displayToken)
+                """
+                // The QR is a convenience for the same values printed above; if the
+                // address cannot be resolved or the code cannot be rendered, the
+                // listener still starts and the values can be entered by hand.
+                if let resolvedHost {
+                    let payload = DiagnosticPairingPayload(
+                        host: resolvedHost,
+                        port: port,
+                        token: displayToken
+                    )
+                    if let encoded = try? payload.encoded(),
+                       let qrLines = TerminalQRCode.lines(for: encoded) {
+                        block += "\n\(localized("listener.ready.qr_caption"))\n"
+                        block += qrLines.joined(separator: "\n")
+                    }
+                }
+                block += "\n\(localized("listener.ready.scope"))"
+                block += "\n\(localized("listener.ready.warning"))"
+                try terminal.write(block)
             } catch {
                 logger.write("listener failed: terminal-output")
                 exit(1)

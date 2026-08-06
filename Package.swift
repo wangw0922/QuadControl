@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "QuadControl",
+    defaultLocalization: "en",
     platforms: [.macOS(.v13), .iOS(.v17)],
     products: [
         .library(name: "QuadControlDiagnosticProtocol", targets: ["QuadControlDiagnosticProtocol"]),
@@ -25,8 +26,20 @@ let package = Package(
         ),
         .executableTarget(
             name: "QuadControlMacListener",
-            dependencies: ["QuadControlDiagnosticProtocol", "QuadControlDiagnosticServer"],
-            path: "apple/Sources/QuadControlMacListener"
+            dependencies: [
+                "QuadControlDiagnosticProtocol",
+                "QuadControlDiagnosticServer",
+                "QuadControlDiagnosticTransport"
+            ],
+            path: "apple/Sources/QuadControlMacListener",
+            // `.copy` on each `.lproj` preserves its exact name. `.process` on the
+            // parent folder lowercases `zh-Hans.lproj` to `zh-hans.lproj`, which
+            // Foundation will not match against a `zh-Hans-*` preferred language,
+            // so every string silently fell back to English.
+            resources: [
+                .copy("Resources/en.lproj"),
+                .copy("Resources/zh-Hans.lproj")
+            ]
         ),
         .executableTarget(
             name: "QuadControlSelfTest",

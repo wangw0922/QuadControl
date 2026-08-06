@@ -35,6 +35,9 @@
 | 10. 主验收与独立一致性复核 | complete | 干净 Swift build、51 项 self-test、静态检查和非交互拒绝通过；独立终审 PASS，无 blocking/major/minor |
 | 11. 完整 Xcode 下的运行验证 | complete | XCTest 4 项、self-test 52 项、模拟器 `xcodebuild test` 2 项、模拟器↔Mac 真实握手/心跳/断开/复用拒绝全部通过 |
 | 12. listener 显式端口缺陷修复 | complete | 定位 EINVAL 根因，先补回归断言并验证其能抓 bug，修复后连跑 3 次稳定 PASS |
+| 13. iPhone SE 3 真机验证 | complete | 个人 Team 签名安装，真实 Wi-Fi LAN 连接：handshake/authenticated/heartbeat/断开 |
+| 14. 四端 UI 简体中文 | complete (iOS+listener) / pending (其余三端) | iOS 全界面与权限弹窗、listener token 段跟随系统语言；Windows/macOS/Android UI 尚不存在，要求已写入 PRODUCT_REQUIREMENTS |
+| 15. 扫码配对 | complete | `.proto` 先定义载荷；Mac CoreImage 终端二维码 + 地址解析；iOS 相机扫码，真机验证通过 |
 
 ## 范围约束
 
@@ -86,3 +89,7 @@
 | 真实 listener 二进制启动即报 `listener failed: startup` | 1 | 定位为 loopback 模式下 `requiredLocalEndpoint` 与 `NWListener(on:)` 重复指定显式端口触发 EINVAL；改为只用 `on:` 指定端口 |
 | 首次探测脚本误判 `NWListener` 绑定方式全部失败 | 1 | 漏设 `newConnectionHandler` 导致 listener 永不 ready；补上后四组对照结果才可信 |
 | 端口预留辅助函数导致回归断言 flaky | 1 | `cancel()` 异步释放 socket，改为等待 `.cancelled` 状态后再复用端口 |
+| SwiftPM `.process()` 把 `zh-Hans.lproj` 小写化，中文静默失效 | 1 | 改为逐个 `.copy("Resources/<locale>.lproj")` 保留大小写 |
+| CLI 无 app bundle，`Bundle.module` 字符串查找忽略用户语言 | 1 | 用 `preferredLocalizations(from:forPreferences:)` 自行解析最佳 `.lproj` |
+| 从 pty 日志 grep 出的 token 多一个 `\r`，长度 44 校验失败 | 1 | 取值前先 `tr -d '\r'` |
+| 用户要求把 token 改成固定 `123456` | 1 | 拒绝并说明离线暴力破解风险；改为实现扫码配对解决输入不便 |

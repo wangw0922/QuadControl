@@ -8,6 +8,18 @@ success, failure, timeout, and explicit disconnect. Terminal scrollback and
 screenshots remain shoulder-surfing risks, and `Data` cannot guarantee physical
 memory zeroing.
 
+The listener also renders the host, port, and token as a QR code so the token
+need not be typed. The code carries the token, so it inherits exactly the same
+scrollback and screenshot exposure as the printed token and no more — it is not
+transmitted, stored, or copied to a pasteboard. A scanned code is treated as
+untrusted input: the host must still pass the private-address policy and the
+token must still decode to 32 bytes, so a code from any other source cannot
+point the client at a public listener. Shortening the token is not an option in
+its place. The client proof is an HMAC over a transcript whose nonces and IDs
+travel in clear, so anyone passively capturing one handshake on the network can
+brute-force a low-entropy token offline, where the online failure rate limits
+give no protection at all.
+
 The listener binds loopback by default. LAN requires explicit `--lan
 --interface wifi|wired`, the required Network.framework interface, and a
 private/link-local peer check. The client separately rejects hostnames and

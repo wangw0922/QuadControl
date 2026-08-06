@@ -1,0 +1,40 @@
+/* Navigation title */
+"app.title" = "QuadControl";
+
+/* Section headers */
+"section.listener" = "Mac 诊断监听端";
+"section.status" = "状态";
+"section.safety" = "安全边界";
+
+/* Field placeholders */
+"field.host" = "私网地址";
+"field.port" = "端口";
+"field.token" = "43 位临时 token";
+
+/* Buttons */
+"button.connect" = "建立诊断连接";
+"button.disconnect" = "断开连接";
+"button.scan" = "扫描配对码";
+"button.cancel" = "取消";
+
+/* Scanner */
+"scanner.title" = "扫描 Mac 上的配对码";
+"text.scan_hint" = "把相机对准 Mac 监听端显示的二维码，会自动填入地址、端口和 token。";
+
+/* Connection status */
+"status.not_connected" = "未连接";
+"status.invalid_host_or_port" = "请输入有效的私网地址和端口";
+"status.invalid_token" = "临时 token 必须是 Mac 上显示的 43 位字符";
+"status.connecting" = "正在连接…";
+"status.authenticating" = "正在验证诊断会话…";
+"status.connected" = "已连接，认证心跳进行中";
+"status.disconnected" = "已断开";
+"status.setup_failed" = "连接初始化失败";
+"status.invalid_scanned_code" = "这不是 QuadControl 的配对码";
+"status.rejected_scanned_host" = "该配对码指向的地址不在你的私有网络内，已拒绝";
+"status.camera_unavailable" = "相机不可用 —— 请在设置中允许相机权限，或手动输入";
+/* %@ is a non-localized protocol failure code such as "network" or "timeout" */
+"status.failed" = "连接失败（%@）";
+
+/* Safety disclaimer */
+"text.safety_boundary" = "仅用于开发阶段的连接诊断。不含投屏、远程控制、剪贴板、文件传输、中继，也不是正式的加密控制通道。";

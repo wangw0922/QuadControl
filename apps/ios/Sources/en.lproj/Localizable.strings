@@ -1,0 +1,40 @@
+/* Navigation title */
+"app.title" = "QuadControl";
+
+/* Section headers */
+"section.listener" = "Mac diagnostic listener";
+"section.status" = "Status";
+"section.safety" = "Safety boundary";
+
+/* Field placeholders */
+"field.host" = "Private host";
+"field.port" = "Port";
+"field.token" = "43-character temporary token";
+
+/* Buttons */
+"button.connect" = "Connect diagnostic session";
+"button.disconnect" = "Disconnect";
+"button.scan" = "Scan pairing code";
+"button.cancel" = "Cancel";
+
+/* Scanner */
+"scanner.title" = "Scan the Mac code";
+"text.scan_hint" = "Point the camera at the code shown by the Mac listener to fill in the address, port, and token.";
+
+/* Connection status */
+"status.not_connected" = "Not connected";
+"status.invalid_host_or_port" = "Enter a valid private host and port";
+"status.invalid_token" = "Temporary token must be the 43-character value shown by the Mac";
+"status.connecting" = "Connecting…";
+"status.authenticating" = "Authenticating diagnostic session…";
+"status.connected" = "Connected; authenticated heartbeats active";
+"status.disconnected" = "Disconnected";
+"status.setup_failed" = "Connection setup failed";
+"status.invalid_scanned_code" = "That code is not a QuadControl pairing code";
+"status.rejected_scanned_host" = "That code points at an address outside your private network and was rejected";
+"status.camera_unavailable" = "Camera unavailable — allow camera access in Settings, or enter the values by hand";
+/* %@ is a non-localized protocol failure code such as "network" or "timeout" */
+"status.failed" = "Connection failed (%@)";
+
+/* Safety disclaimer */
+"text.safety_boundary" = "Development connection diagnostics only. No screen sharing, remote control, clipboard, files, relay, or production encrypted control session.";

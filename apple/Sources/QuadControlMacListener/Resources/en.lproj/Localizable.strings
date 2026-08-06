@@ -1,0 +1,10 @@
+/* Shown once on /dev/tty when the listener becomes ready. Log lines written to
+   stderr stay untranslated because they are machine-readable identifiers. */
+"listener.ready.title" = "QuadControl diagnostic listener ready";
+"listener.ready.host" = "Host: %@";
+"listener.ready.port" = "Port: %@";
+"listener.ready.token_caption" = "Temporary token (shown once; expires in 180 seconds):";
+"listener.ready.scope" = "No screen, input, clipboard, files, relay, or unattended access.";
+"listener.ready.warning" = "Terminal scrollback and screenshots can expose this token. Ctrl-C stops.";
+"listener.host.unresolved" = "could not resolve the selected interface — run `ipconfig getifaddr en0`";
+"listener.ready.qr_caption" = "Or scan this code with the app instead of typing the token:";

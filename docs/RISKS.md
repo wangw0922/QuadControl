@@ -5,8 +5,11 @@
 - Invoking adb can start its local server; M0 does not persist device serials or network addresses.
 - Platform host builds require toolchains not bundled by this repository.
 - Apple diagnostic token display may leak through terminal scrollback or screenshots;
-  in-memory `Data` cannot guarantee physical zeroization. iOS Simulator build and
-  test now pass, but signing and physical-device results remain Blocked.
+  the QR pairing code carries the same token and has the same exposure. In-memory
+  `Data` cannot guarantee physical zeroization.
+- The listener's QR must be read from a real terminal. Redirected or re-rendered
+  output loses the explicit background colors and can invert the code, which iOS
+  will not decode.
 - The listener closes rejected handshakes without disclosing the reason, so the
   client can only report `network`. Diagnosing a refused token requires the Mac
   listener log, which is a deliberate trade of client-side clarity for not

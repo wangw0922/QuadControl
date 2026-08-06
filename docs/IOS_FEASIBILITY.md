@@ -5,11 +5,15 @@ Simulator with full Xcode. `xcodebuild test` against an iPhone 17 (iOS 26.5)
 Simulator passes, and the SwiftUI diagnostic client completes a real
 authenticated session against the Mac listener over loopback.
 
-iOS **physical-device** work is still **Blocked**: signing with a real Team,
-device provisioning, Developer Mode, and on-device validation have not been
-performed here. Simulator results are not device evidence — the Simulator shares
-the Mac's network stack, so it does not exercise Wi-Fi LAN routing or the iOS
-local-network permission prompt that a real iPhone shows on first connect.
+Physical-device validation is **done** for the diagnostic client. An iPhone SE 3
+(iPhone14,6, iOS 26.5) was signed with a free personal team, installed via
+`devicectl`, and connected to the Mac listener over real Wi-Fi LAN. That covers
+what the Simulator cannot: signing and install, LAN routing rather than the
+shared loopback stack, the iOS local-network permission prompt, and the camera
+used by QR pairing.
+
+Free personal-team signing requires Developer Mode on the device and manual
+trust of the developer profile; both are user actions that cannot be scripted.
 
 iOS P0 remains **Blocked** pending real-device evidence. ReplayKit broadcasts
 require user action. Screen Curtain (physical screen-off while active) is

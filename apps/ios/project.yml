@@ -3,6 +3,10 @@ name: QuadControlIOS
 # repository does not include or claim to have generated an .xcodeproj.
 options:
   minimumXcodeGenVersion: 2.38.0
+  developmentLanguage: en
+# Simplified Chinese is a product requirement for every client UI; the .lproj
+# folders under Sources are picked up as localized variant groups.
+
 packages:
   QuadControl:
     path: ../..
@@ -14,8 +18,10 @@ targets:
     sources: [Sources]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.quadcontrol.diagnostic
+        PRODUCT_BUNDLE_IDENTIFIER: com.wangw0922.quadcontrol.diagnostic
         INFOPLIST_FILE: Sources/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_EMIT_LOC_STRINGS: YES
     dependencies:
       - package: QuadControl
         product: QuadControlDiagnosticProtocol
@@ -28,7 +34,8 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.quadcontrol.diagnostic.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.wangw0922.quadcontrol.diagnostic.tests
+        CODE_SIGN_STYLE: Automatic
     dependencies:
       - target: QuadControlIOS
 schemes:

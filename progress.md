@@ -58,3 +58,17 @@
 - 修正文档与实际行为不符处：服务端拒绝不回错误码，iPhone 只显示 `network`，真正原因需看 Mac 日志；该行为记为显式安全决策。
 - 清理重构遗留：删除空目录 `QuadControlDiagnosticClient`，`ARCHITECTURE.md` 改为实际 target 名。
 - 已更新 STATUS/RISKS/DECISIONS/IOS_FEASIBILITY/CONNECT_AND_TEST/README，iOS 从"源码完成、运行 Blocked"改为"模拟器已验证、真机签名仍未验证"。
+- 修复经 PR #2 合并到 `main`（squash `700a9dc`），CI 的 Rust 与 Apple 两项均通过。
+
+## 2026-08-06 真机验证、简体中文与扫码配对
+
+- 用户完成两项人工前置：iPhone 开启 Developer Mode、Xcode 登录 Apple ID。
+- 从 Xcode 偏好中取到个人 Team `TEAMIDREDACT`；Team ID 不写入仓库，改由命令行传入，保持"不保存个人签名信息"的既有承诺。
+- iPhone SE 3 真机签名构建、安装、启动成功；首次启动需用户手动信任开发者描述文件。
+- **真机 Wi-Fi 局域网连接验证通过**：handshake → authenticated → heartbeat 1、2 → 主动断开。补上了模拟器无法证明的 LAN 路由、本地网络权限与真机签名。
+- 简体中文本地化：iOS 加 `en`/`zh-Hans` 两套 `.lproj`，status 由硬编码英文串重构为 `ConnectionStatus` 枚举；`InfoPlist.strings` 覆盖本地网络与相机权限弹窗文案。
+- macOS listener 的 token 展示段本地化（按用户要求日志行保持英文）；过程中修掉 SwiftPM 小写 `.lproj` 和 CLI 无 app bundle 两个导致中文静默失效的问题。
+- 用户提出把 token 改成固定 `123456`。已拒绝，并给出分析：随机 6 位 PIN 同样不可行，因为 client proof 可被离线暴力破解，限速无效。改为实现扫码配对。
+- 扫码配对：`session.proto` 先定义 `DiagnosticPairingPayload`，Mac 用 CoreImage 在终端渲染二维码并解析本机私网地址，iOS 加相机扫码并复用私网校验与 token 解码路径。
+- **扫码配对真机验证通过**：handshake → authenticated → heartbeat 1-4。
+- 测试增至：self-test 62 项断言、iOS 9 项 XCTest（含四种恶意二维码拒绝场景）、Swift package 4 项 XCTest。

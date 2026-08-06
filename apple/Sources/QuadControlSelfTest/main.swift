@@ -422,6 +422,38 @@ do {
     runner.expect(false, "loopback probe setup threw")
 }
 
+do {
+    let token = try PairingToken.encode(Data(repeating: 0x11, count: 32))
+    let encoded = try DiagnosticPairingPayload(host: "192.168.1.23", port: 47_100, token: token).encoded()
+    let decoded = try DiagnosticPairingPayload.decode(encoded)
+    runner.expect(decoded.host == "192.168.1.23", "pairing payload round-trips host")
+    runner.expect(decoded.port == 47_100, "pairing payload round-trips port")
+    runner.expect(decoded.token == token, "pairing payload round-trips token")
+    runner.expect(encoded.count <= DiagnosticPairingPayload.maxEncodedLength, "pairing payload fits its bound")
+    let json = String(decoding: encoded, as: UTF8.self)
+    runner.expect(json.contains("\"protocol_version\""), "pairing payload uses the schema key")
+} catch {
+    runner.expect(false, "pairing payload round-trip threw")
+}
+
+runner.expectThrows("pairing payload rejects a short token") {
+    _ = try DiagnosticPairingPayload(host: "10.0.0.2", port: 47_100, token: "tooshort").encoded()
+}
+runner.expectThrows("pairing payload rejects port zero") {
+    let token = try PairingToken.encode(Data(repeating: 0x11, count: 32))
+    _ = try DiagnosticPairingPayload(host: "10.0.0.2", port: 0, token: token).encoded()
+}
+runner.expectThrows("pairing payload rejects a wrong version") {
+    let token = try PairingToken.encode(Data(repeating: 0x11, count: 32))
+    _ = try DiagnosticPairingPayload(version: 2, host: "10.0.0.2", port: 47_100, token: token).encoded()
+}
+runner.expectThrows("pairing payload rejects oversized input") {
+    _ = try DiagnosticPairingPayload.decode(Data(repeating: 0x41, count: 4_096))
+}
+runner.expectThrows("pairing payload rejects non-JSON input") {
+    _ = try DiagnosticPairingPayload.decode(Data("https://example.test/pair".utf8))
+}
+
 if let reserved = reserveLoopbackPort() {
     do {
         let bound = try ExplicitPortProbe(port: reserved).boundPort()

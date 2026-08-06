@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "QuadControl Diagnostic";
+"NSLocalNetworkUsageDescription" = "Connects only to the private Mac diagnostic listener you enter.";
+"NSCameraUsageDescription" = "Scans the pairing code shown by your Mac so you do not have to type the token.";

@@ -28,3 +28,12 @@ where `lp(x)` is `be32(byteCount(x)) || x`. Operations are exact:
 
 The heartbeat/ack status is decoded and validated before its semantic UTF-8
 value enters the canonical transcript; raw JSON serialization is never signed.
+
+`DiagnosticPairingPayload` is a separate, out-of-band message: the JSON the Mac
+listener renders as a QR code so the phone does not have to type the token. It
+carries only `protocol_version`, a numeric private host, a port, and the same
+43-character token string. It is bounded to 512 bytes, is never a URL, and is
+never opened by the system, persisted, or placed on a pasteboard. Scanning is
+input, not authentication — the scanned host is still checked against the
+client's private-address policy and the token still goes through the same decode,
+so a hostile code cannot redirect the client or bypass any validation.

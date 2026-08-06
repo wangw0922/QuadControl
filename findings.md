@@ -61,3 +61,21 @@
 - **文档与实际行为不符**：服务端拒绝握手时直接关连接，不发 `DiagnosticError` 帧，所以 iPhone 对所有服务端拒绝都只显示 `Connection failed (network)`。原 `CONNECT_AND_TEST.md` 声称用户会看到 `authentication`/`expired`/`consumed`，实际看不到。已改为如实描述，并把"不向未认证对端透露拒绝原因"记为显式决策而非缺陷。
 - 自动化测试需要 listener 有真正的 controlling terminal 才能拿到 token（`/dev/tty` 守卫），用 `pty.fork()` 实现；这只用于本地测试脚本，没有改动生产代码的 token 显示约束。
 - `apple/Sources/QuadControlDiagnosticClient/` 是重构后遗留的空目录，`ARCHITECTURE.md` 仍按旧名描述；已删除目录并改为实际的 `QuadControlDiagnosticTransport` / `QuadControlDiagnosticServer`。
+
+## 2026-08-06 真机、简体中文与扫码配对
+
+- 真机前置有两项只能由用户完成，不可脚本化：iPhone 开启 Developer Mode（`devicectl` 报 `developerModeStatus: disabled`），以及在 Xcode 登录 Apple ID 生成签名证书。登录属于凭据输入，助手不得代做。
+- Xcode 登录后 keychain 仍为 0 个证书；证书是首次自动签名构建时按需生成的。Team ID 可从 `defaults read com.apple.dt.Xcode` 的 `IDEProvisioningTeamByIdentifier` 读到（本机 `TEAMIDREDACT`，免费个人 Team）。
+- 免费个人 Team 装机后首次启动必须在手机上手动信任开发者描述文件，否则 `devicectl` 报 profile not trusted；设备锁屏时报的是另一个错（device not unlocked），两者要分清。
+- **真机验证补上了模拟器证明不了的部分**：真实 Wi-Fi 局域网路由（非共享 loopback 栈）、iOS 本地网络权限弹窗、真机签名安装、相机。
+- LAN 模式的 listener 绑定的是 `*:47100` 通配地址，不像 loopback 模式绑定到具体地址。防线在 accept 时的 `isPrivateOrLinkLocal` peer 校验和 `requiredInterfaceType`，即 bind 之后而非 bind 之时。符合代码合同，但比「`--interface wifi` 就只在 Wi-Fi 上监听」的直觉宽。
+- 用户要求把 token 改成固定 `123456` 以便输入。已拒绝并说明：LAN 模式下同网段任何设备可连，固定值等于没有认证。
+- 进一步分析否掉了「随机 6 位 PIN」这个看似合理的折中：在线猜测确实被限速挡住（每 peer 5 次/分、全局 20 次/分，token 仅活 180 秒 → 最多约 60 次尝试对 100 万组合无威胁），**但 client proof 是 `HMAC(token, transcript)` 且 transcript 中的 nonce/ID 明文传输，被动抓一次握手即可离线秒破 6 位数字**。限速对离线攻击完全无效。这是选择扫码而非缩短 token 的决定性理由。
+- 按项目规则「所有跨平台消息必须先写入 .proto」，配对载荷先加进 `session.proto` 再实现 Swift adapter。
+- 配对载荷刻意不用 URL 形式：URL 会诱导系统去「打开」它，且容易进入各类日志。改用 JSON，512 字节上限，扫描内容按不可信输入处理——地址仍走私网校验，token 仍走同一解码路径。已加测试覆盖公网地址、域名、任意 URL 文本和超长输入四种恶意二维码。
+- 终端二维码用 CoreImage（macOS 自带，不引入第三方依赖）生成，用半块字符把两行模块压进一个字符格以保持近似正方形，并显式设置黑白 ANSI 背景色——终端主题不确定，深色主题会让二维码反色而 iOS 扫不出来。
+- 为了让二维码带上具体地址，新增了接口地址解析（`NWPathMonitor` 拿接口名 + `getifaddrs` 取 IPv4），顺带修掉一个 UX 缺陷：LAN 模式原本只能显示「所选接口的私网地址」，用户还得自己去查 `ipconfig`。
+- **SwiftPM 的 `.process()` 会把 `zh-Hans.lproj` 小写成 `zh-hans.lproj`**，Foundation 匹配不上 `zh-Hans-US`，所有字符串静默回退英文。改用逐个 `.copy("Resources/zh-Hans.lproj")` 保留大小写。
+- **CLI 进程没有 app bundle，CFBundle 的 `Bundle.module` 字符串查找不走用户语言**，直接落到 development region。`Bundle.preferredLocalizations(from:forPreferences:)` 显式传入 `Locale.preferredLanguages` 才正确匹配；listener 因此自行解析最佳 `.lproj`。
+- iOS 的 status 原本是硬编码英文 String，测试直接断言英文文案。改成 `ConnectionStatus` 枚举后文案与断言解耦，并加了「每个 case 都有非空且不等于原始 key 的译文」这条断言，漏翻会被测试抓到。
+- pty 读到的日志行尾带 `\r`，直接 `grep` 取 token 会多一个字符导致长度 44、粘贴校验失败；自动化取值必须先 `tr -d '\r'`。

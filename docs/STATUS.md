@@ -6,22 +6,29 @@ diagnostic listener/shared Swift package.
 
 Verified locally with full Xcode 26.6 (iOS 26.5 SDK):
 
-- `swift build` and `swift test` pass; XCTest executes 4 assertions. The earlier
-  Command Line Tools environment could not run XCTest at all.
-- `QuadControlSelfTest` passes 52 assertions over real TCP loopback.
-- `xcodebuild test` on an iPhone 17 (iOS 26.5) Simulator passes the 2
+- `swift build` and `swift test` pass; XCTest executes 4 assertions.
+- `QuadControlSelfTest` passes 62 assertions over real TCP loopback.
+- `xcodebuild test` on an iPhone 17 (iOS 26.5) Simulator passes 9
   `ConnectionModelTests`.
-- The shipped `QuadControlMacListener` binary was run end-to-end against the
-  Simulator app: handshake, authentication, repeating 5-second heartbeats, user
-  disconnect, in-TTL token reuse rejected as `consumed`, and post-TTL reuse
-  rejected as `expired`. Listener output contained only short connection IDs —
-  no token, address, or payload.
+- Simulator end-to-end: handshake, authentication, 5-second heartbeats, user
+  disconnect, in-TTL token reuse rejected as `consumed`, post-TTL reuse rejected
+  as `expired`.
+- **Physical iPhone SE 3 (iPhone14,6, iOS 26.5)**: signed with a free personal
+  team, installed, and connected over real Wi-Fi LAN — not loopback. The iOS
+  local-network permission prompt was accepted and the session authenticated and
+  heartbeated. Verified twice: once with a typed token, once by scanning the
+  listener's QR pairing code.
+
+Listener output contains only short connection IDs — no token, address, or
+payload.
+
+UI is localized for Simplified Chinese and English: the iOS app and the macOS
+listener's one-time-token block follow the system language, while stderr log
+lines stay English because docs and tests match on them.
 
 Rust remains **Blocked** locally where Cargo is unavailable; GitHub Actions
 covers `cargo metadata`, Clippy, and workspace tests. Android real-device
-behavior is **Blocked** without `adb` and a device. iOS **physical-device**
-build, signing, and on-device validation remain **Blocked** — Simulator
-evidence does not substitute for them.
+behavior is **Blocked** without `adb` and a device.
 
 No production UI, media stream, pairing, remote relay, device control, Android
 screen-off, ReplayKit, Screen Curtain, HID, or iOS P0 result is implemented.
