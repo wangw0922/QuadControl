@@ -39,6 +39,8 @@
 | 14. 四端 UI 简体中文 | complete (iOS+listener) / pending (其余三端) | iOS 全界面与权限弹窗、listener token 段跟随系统语言；Windows/macOS/Android UI 尚不存在，要求已写入 PRODUCT_REQUIREMENTS |
 | 15. 扫码配对 | complete | `.proto` 先定义载荷；Mac CoreImage 终端二维码 + 地址解析；iOS 相机扫码，真机验证通过 |
 | 16. M0：macOS 蓝牙 HID 能力检测 | complete (只读) / blocked (外设角色) | `QuadControlMacHIDProbe` 报告控制器 HID 支持与三个外设角色 API 均存在；`can_act_as_hid_peripheral` 恒为 `unknown`，需用户在场的主动实验 |
+| 17. HID 主动实验第一部分：本地 API | complete | 确认必须打成 app bundle 并经 LaunchServices 启动（否则 TCC 直接 SIGABRT）；HID SDP 记录发布成功并可撤销；PSM 0x11/0x13 均可注册 |
+| 18. HID 主动实验第二部分：手机侧 | pending | 需完整 HID 记录（report descriptor 等）+ 解决 Class of Device 与可发现状态，再由 iPhone 实际尝试配对 |
 
 ## 范围约束
 
@@ -94,3 +96,5 @@
 | CLI 无 app bundle，`Bundle.module` 字符串查找忽略用户语言 | 1 | 用 `preferredLocalizations(from:forPreferences:)` 自行解析最佳 `.lproj` |
 | 从 pty 日志 grep 出的 token 多一个 `\r`，长度 44 校验失败 | 1 | 取值前先 `tr -d '\r'` |
 | 用户要求把 token 改成固定 `123456` | 1 | 拒绝并说明离线暴力破解风险；改为实现扫码配对解决输入不便 |
+| 调用 IOBluetooth 的进程被 TCC 以 SIGABRT 杀死 | 3 | 依次排除内嵌 plist 段、直接 exec bundle 二进制；最终确认必须经 LaunchServices 启动 app bundle |
+| SDP 记录发布全部返回 nil，误判为策略拦截 | 1 | 对照 Apple `OBEXOPPSDPRecord.plist` 发现 UUID 需裸 `Data`、ServiceName 需纯 `String`；改对后发布成功 |

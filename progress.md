@@ -83,3 +83,13 @@
 - 不报告控制器蓝牙地址：稳定硬件标识符，本诊断不需要，与 ADB probe 不持久化设备序列号一致。
 - 已输出 `docs/MACOS_HID_FEASIBILITY.md`，写明仍需一次用户在场的主动实验（发布记录 → 让 iPhone 尝试配对 → 发一个 HID report → 撤销记录并还原可发现状态）。
 - 测试增至 19 项 Swift package XCTest（4 协议 + 15 HID probe）。
+- 经 PR #4 合并到 `main`（squash `a2b3f34`）。首次 CI Apple job 失败是 GitHub 侧 `Failed to resolve action download info` 基础设施故障，重跑后双绿。
+
+## 2026-08-06 HID 外设角色主动实验（第一部分）
+
+- 用户在场，同意做会改动蓝牙状态的主动实验。
+- 四组对照确定进程形态要求：必须打成 `.app` bundle 且经 LaunchServices 启动，否则 TCC 直接 SIGABRT；崩溃提示指向 Info.plist 缺 key，具有误导性。
+- 自我纠错一次：首轮 SDP 发布全 nil，误以为策略拦截，实为字典格式错误。对照 Apple `OBEXOPPSDPRecord.plist` 修正 UUID 与 ServiceName 编码后成功。
+- 已确认：HID service class `0x1124` 可发布并撤销；PSM `0x0011`/`0x0013` 均可注册。macOS 未对第三方保留 HID 角色。
+- 未确认：完整 HID 记录（report descriptor 等）、Class of Device 能否改（最可疑的阻塞点）、可发现状态控制、iPhone 是否会列出并配对。
+- 实验后蓝牙状态已还原，无残留进程与记录。

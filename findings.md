@@ -89,3 +89,15 @@
 - 探测器加载 IOBluetooth 用 `dlopen` 而非链接框架，只做运行时 introspection，不调用任何 API，因此不触发 TCC 权限提示、不改动蓝牙状态。
 - 框架未加载时 API 可用性报 `unknown` 而非 `no`——运行时答不上来不等于 API 不存在。这与 ADB probe 拒绝把「测不到」写成布尔值是同一条原则。
 - `system_profiler SPBluetoothDataType -json` 的结构：`SPBluetoothDataType[0].controller_properties`，开关量用 `attrib_on`/`attrib_off`，支持服务是 `0x392039 < HFP AVRCP A2DP HID ... >` 这种带尖括号的字符串，需要单独解析。
+
+## 2026-08-06 HID 外设角色主动实验（第一部分）
+
+- 发布 SDP 记录会经 `IOBluetoothCoreBluetoothCoordinator`，被蓝牙 TCC 门控，且**不给错误码而是直接 SIGABRT 杀进程**（exit 134）。四组对照：纯 CLI 无 usage description → 杀；CLI 把 `NSBluetoothAlwaysUsageDescription` 嵌进 `__TEXT,__info_plist` 段 → 仍杀（该段不被采纳）；`.app` bundle 但直接 exec 内部二进制 → 仍杀；`.app` bundle 经 `open`/LaunchServices 启动 → 放行。
+- 崩溃原因字符串始终是"Info.plist 必须含 NSBluetoothAlwaysUsageDescription"，但第二、三组里这个 key 明明存在 —— **该提示具有误导性，真正起决定作用的是有没有经 LaunchServices 启动**。因此任何需要蓝牙的组件必须打成 app bundle，不能沿用本仓库其余部分的 SwiftPM CLI 形态。
+- `CBManager.authorization` 在实例化 `CBCentralManager` 之前恒为 `notDetermined`；实例化才触发权限弹窗。
+- **一次重要的自我纠错**：首轮所有记录都返回 `nil`，看起来像策略拦截，实际是我的字典格式错了。对照 Apple 自己的 `OBEXOPPSDPRecord.plist` 才发现：UUID 是裸大端 `Data`（`Data([0x11,0x24])`）而非 `DataElementType: 3` 包装；`"0100 - ServiceName*"` 是纯 `String` 而非 data-element 字典；另有 `LocalAttributes` 块。`nil` 不带任何错误信息，格式错和被拒绝长得一模一样——遇到 nil 先拿 Apple 的 plist 对格式。
+- 格式改对后：HID service class `0x1124` 发布成功（handle `0x4f491124`），SerialPort `0x1101` 对照组同样成功，两者 `remove()` 均返回 0。
+- `registerForChannelOpenNotifications:` 对 HID 的两个 PSM（`0x0011` control、`0x0013` interrupt）**均注册成功**。
+- 结论：macOS 并未对第三方进程保留 HID service class 或 HID PSM。本地 API 这一半的答案是「可以」。
+- 仍未证明的是涉及手机的那一半，其中 **Class of Device 最可疑**：iPhone 按 CoD 过滤可配对配件，而 macOS 把自己报成 Computer，公共 API 中未找到修改入口。若改不了，SDP 记录再完整也可能不会被 iPhone 列为键盘。
+- 实验后状态已还原：所有记录已 remove，蓝牙仍为 `State: On` / `Discoverable: Off`，与实验前一致。

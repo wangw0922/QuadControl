@@ -61,18 +61,80 @@ no device, and changes no Bluetooth state. It also omits the controller's
 Bluetooth address: that is a stable hardware identifier this diagnostic does not
 need.
 
-## The active experiment this still needs
+## Active experiment — part 1 (done)
 
-Closing the question requires a separate, explicitly user-approved step that
-does mutate system state:
+The first half of the active experiment has now run on the development host,
+with the user present. State was restored afterwards: every published record was
+removed, and Bluetooth was left `State: On` / `Discoverable: Off`, unchanged.
 
-1. publish a HID SDP record and register for the two PSMs,
-2. make the Mac discoverable and check whether an iPhone offers to pair,
-3. if it pairs, send one HID report and observe whether iOS acts on it,
-4. remove the record and restore the previous discoverable state.
+### The process must be a real app bundle launched by LaunchServices
 
-That experiment needs a person present to accept the pairing prompt on the
-phone, so it cannot be scripted. Until it runs, treat Mac→iPhone HID control as
-**Blocked**, exactly like ReplayKit and Screen Curtain. Whatever the outcome,
-this stays inside the project's boundary: HID input is a user-authorized
-accessory, never a lock-screen bypass and never unattended control.
+Touching the SDP publishing API routes through
+`IOBluetoothCoreBluetoothCoordinator`, which is gated by the Bluetooth TCC
+service. A process that fails the gate is **killed with SIGABRT**, not given an
+error to handle:
+
+| Process shape | Result |
+|---|---|
+| Plain CLI, no usage description | `exit 134` — TCC crash |
+| CLI with `NSBluetoothAlwaysUsageDescription` in an embedded `__TEXT,__info_plist` section | `exit 134` — the section is not honoured |
+| `.app` bundle with the key, executable exec'd directly | `exit 134` |
+| `.app` bundle with the key, launched via `open` (LaunchServices) | runs; TCC grants, `CBManager.authorization == 3` |
+
+The crash reason is always the same string: the Info.plist must contain
+`NSBluetoothAlwaysUsageDescription`. It is misleading — the key was present in
+rows two and three. What actually matters is that LaunchServices launched the
+bundle. Anything that needs Bluetooth must therefore ship as a bundled app, not
+as the SwiftPM CLI the rest of this repo uses.
+
+`CBManager.authorization` stays `notDetermined` until a `CBCentralManager` is
+instantiated; that is what raises the prompt.
+
+### The SDP dictionary format is not the one the headers suggest
+
+A first attempt returned `nil` for every record and looked like a policy block.
+It was not — the dictionary was malformed. Apple's own records, for example
+`/System/Library/CoreServices/OBEXAgent.app/Contents/Resources/OBEXOPPSDPRecord.plist`,
+show the real encoding:
+
+- UUIDs are raw big-endian `Data` (`Data([0x11, 0x24])`), **not**
+  `["DataElementType": 3, ...]`,
+- `"0100 - ServiceName*"` is a plain `String`, not a data-element dictionary,
+- integers use `["DataElementType": 1, "DataElementSize": n, "DataElementValue": …]`,
+- a `LocalAttributes` dictionary carries `Persistent` and friends.
+
+Treat a `nil` return as "check the dictionary against Apple's plists first". It
+carries no error detail and looks identical to a refusal.
+
+### What succeeded
+
+With the correct format and Bluetooth authorized:
+
+- HID service class `0x1124` published — handle `0x4f491124`, removed cleanly.
+- SerialPort `0x1101` published as a control, also removed cleanly.
+- `registerForChannelOpenNotifications:` succeeded for **both** HID PSMs,
+  `0x0011` (control) and `0x0013` (interrupt).
+
+So macOS does not reserve the HID service class or the HID PSMs against
+third-party processes. The half of the question about local API access is
+answered: **yes**.
+
+## Active experiment — part 2 (outstanding)
+
+What is still unproven is the half that involves the phone:
+
+1. The published record is a skeleton. For iOS to treat it as a keyboard it needs
+   the full HID attribute set — report descriptor (`0x0206`), device subclass
+   (`0x0202`), reconnect/virtual-cable flags, and the interrupt PSM in
+   `AdditionalProtocolDescriptorList` (`0x000D`).
+2. **Class of Device.** An iPhone filters what it offers to pair by CoD, and
+   macOS advertises itself as `Computer`. No public API to change it was found.
+   If it cannot be changed, a correct HID record may still never be offered as a
+   keyboard — this is currently the most likely blocker.
+3. **Discoverable state.** `IOBluetoothUserLib.h` exposes no public control for
+   it.
+
+Until an iPhone has actually paired and acted on a report, treat Mac→iPhone HID
+control as **Blocked**. Whatever the outcome, this stays inside the project's
+boundary: HID input is a user-authorized accessory, never a lock-screen bypass
+and never unattended control.
