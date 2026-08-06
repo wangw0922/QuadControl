@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import QuadControlDiagnosticProtocol
 import QuadControlDiagnosticServer
 import QuadControlDiagnosticTransport
@@ -113,6 +114,74 @@ private final class LoopbackProbe: @unchecked Sendable {
         default:
             break
         }
+    }
+}
+
+/// Reserves a loopback port ephemerally so the explicit-port regression can use a
+/// real port number without hardcoding one that may already be bound.
+private func reserveLoopbackPort() -> UInt16? {
+    let parameters = NWParameters.tcp
+    parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+    guard let listener = try? NWListener(using: parameters, on: .any) else { return nil }
+    let ready = DispatchSemaphore(value: 0)
+    let cancelled = DispatchSemaphore(value: 0)
+    listener.newConnectionHandler = { $0.cancel() }
+    listener.stateUpdateHandler = { state in
+        switch state {
+        case .ready, .failed: ready.signal()
+        case .cancelled: cancelled.signal()
+        default: break
+        }
+    }
+    listener.start(queue: .global())
+    guard ready.wait(timeout: .now() + 5) == .success else {
+        listener.cancel()
+        return nil
+    }
+    let port = listener.port?.rawValue
+    // `cancel()` releases the socket asynchronously; the port is not rebindable
+    // until the listener actually reaches `.cancelled`.
+    listener.cancel()
+    guard cancelled.wait(timeout: .now() + 5) == .success else { return nil }
+    return port
+}
+
+/// Starts a loopback server on an explicit, non-ephemeral port and reports the port
+/// it actually bound. `QuadControlMacListener` always requests an explicit port, so
+/// this is the configuration the shipped listener runs in.
+private final class ExplicitPortProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let server: DiagnosticServer
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var readyPort: UInt16?
+
+    init(port: UInt16) throws {
+        server = DiagnosticServer(
+            configuration: DiagnosticServerConfiguration(port: port, mode: .loopback),
+            token: try OneTimeToken(value: Data(repeating: 0x33, count: 32))
+        )
+    }
+
+    func boundPort() throws -> UInt16? {
+        try server.start { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case let .ready(port):
+                self.lock.lock()
+                self.readyPort = port
+                self.lock.unlock()
+                self.semaphore.signal()
+            case .failed:
+                self.semaphore.signal()
+            default:
+                break
+            }
+        }
+        defer { server.stop() }
+        guard semaphore.wait(timeout: .now() + 5) == .success else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return readyPort
     }
 }
 
@@ -351,6 +420,17 @@ do {
     runner.expect(loopbackPassed, "real loopback auth, heartbeat, ack, and disconnect")
 } catch {
     runner.expect(false, "loopback probe setup threw")
+}
+
+if let reserved = reserveLoopbackPort() {
+    do {
+        let bound = try ExplicitPortProbe(port: reserved).boundPort()
+        runner.expect(bound == reserved, "explicit loopback port binds and is reported")
+    } catch {
+        runner.expect(false, "explicit loopback port probe threw")
+    }
+} else {
+    runner.expect(false, "could not reserve a loopback port for the explicit-port check")
 }
 
 runner.finish()

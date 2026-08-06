@@ -66,9 +66,13 @@ public final class DiagnosticServer: @unchecked Sendable {
             : NWEndpoint.Port(rawValue: configuration.port)!
         switch configuration.mode {
         case .loopback:
+            // The port is specified once, through `NWListener(using:on:)`. Pinning an
+            // explicit port here as well is rejected with EINVAL, which made every
+            // non-ephemeral loopback listener fail to start. This endpoint therefore
+            // constrains the host only.
             parameters.requiredLocalEndpoint = .hostPort(
                 host: "127.0.0.1",
-                port: requestedPort
+                port: .any
             )
         case .lanWiFi:
             parameters.requiredInterfaceType = .wifi

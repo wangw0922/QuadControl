@@ -45,3 +45,16 @@
 - 独立终审指出首个 server heartbeat event 早于 ACK send，原 loopback 可能假阳性；self-test 现必须等到 sequence 2（证明 client 已验证 ack1 后继续），并增加损坏 heartbeat MAC 与跨域 ack MAC negative。实际 51 项断言通过。
 - 最终从 `swift package clean` 后运行 `scripts/verify-all.sh`：Swift package describe/build PASS，`QuadControlSelfTest` 51 assertions PASS；Cargo、XCTest、完整 Xcode/XcodeGen 如实 Blocked。`sh -n`、Info.plist lint、project.yml YAML parse、iOS app/test `swiftc -parse` 全部通过；非交互 listener 按合同 exit 64 且未输出 token。
 - 独立 `gpt-5.6-sol` 代码 vs 方案终审最终结论 **PASS**，无 blocking、major 或 minor。项目不是 Git 仓库，因此未创建 commit、tag 或 merge；本轮发布收尾以 README/STATUS/CONNECT_AND_TEST 与验证记录为准。
+
+## 2026-08-06 完整 Xcode 环境验证
+
+- 复核主机工具链：完整 Xcode 26.6 + iOS 26.5 SDK + `simctl` + iPhone 17 模拟器已 Booted；`cargo`/`adb` 仍缺。此前的 iOS Blocked 前提已消失。
+- `swift test` 首次实际执行 XCTest：4 项通过（历史上 CLT 环境从未跑过断言）。
+- 安装 XcodeGen 2.46.0，`xcodegen generate` 成功产出 `QuadControlIOS.xcodeproj`。
+- iPhone 17（iOS 26.5）模拟器 `xcodebuild test`：`** TEST SUCCEEDED **`，2 项 `ConnectionModelTests` 通过。
+- 用真实 listener 二进制做端到端连接时暴露生产缺陷：loopback + 显式端口触发 `NWListener` EINVAL，默认调用的 listener 从来无法启动。已定位、用四组对照实测确认修复方案并修复。
+- 先补回归断言并验证其在未修复代码上 FAIL、修复后 PASS，self-test 51 → 52 项；连跑 3 次稳定通过。
+- 模拟器端到端实测通过：handshake、authenticated、heartbeat 1..10 每 5 秒递增、用户 Disconnect、TTL 内 token 复用拒为 `consumed`、超 TTL 复用拒为 `expired`；日志只含短连接 ID。
+- 修正文档与实际行为不符处：服务端拒绝不回错误码，iPhone 只显示 `network`，真正原因需看 Mac 日志；该行为记为显式安全决策。
+- 清理重构遗留：删除空目录 `QuadControlDiagnosticClient`，`ARCHITECTURE.md` 改为实际 target 名。
+- 已更新 STATUS/RISKS/DECISIONS/IOS_FEASIBILITY/CONNECT_AND_TEST/README，iOS 从"源码完成、运行 Blocked"改为"模拟器已验证、真机签名仍未验证"。

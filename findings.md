@@ -45,3 +45,19 @@
 - `String(describing: connection.endpoint)` 包含源端口，不能作为 per-peer 限速 key；共享地址策略现只返回解析后的数值 host，使重连换端口不能绕过 peer bucket。
 - Apple 官方本地网络隐私说明确认：iOS 首次发起本地 TCP 会弹出用户授权，`NSLocalNetworkUsageDescription` 必须存在；`NWConnection` 可能先进入 waiting。本实现保持 10 秒 deadline、允许 waiting 后继续，并在文档中要求授权过慢时用新 token 重试。
 - 独立终审最终确认 Apple M0 源码与收紧后的合同一致；剩余 iOS/Rust/ADB Blocked 都是当前主机工具链/真机证据边界，不是已知源码一致性缺陷。
+
+## 2026-08-06 完整 Xcode 环境下的运行验证
+
+- 主机环境已变化：完整 Xcode 26.6（iOS 26.5 SDK）+ `simctl` + 多台模拟器可用；`cargo`、`adb`、`xcodegen` 仍缺（xcodegen 本轮已装）。此前所有"因只有 Command Line Tools"导致的 Blocked 前提不再成立。
+- `swift test` 首次真正执行 XCTest：4 项通过。此前 CLT 环境只能构建空测试模块并退出 0，从未运行过断言。
+- **发现并修复一个此前从未被触发的生产缺陷**：`DiagnosticServer.start()` 在 loopback 模式下同时把显式端口写进 `parameters.requiredLocalEndpoint` 和 `NWListener(using:on:)`，`NWListener` 初始化直接抛 `POSIXErrorCode(22)` EINVAL。
+- 影响范围：`QuadControlMacListener` 默认就是 loopback + 47100，且参数解析拒绝 port 0，所以**发布出来的 listener 二进制在默认调用下从来没能启动过**，只会打印 `listener failed: startup`。LAN 模式不设 `requiredLocalEndpoint`，不受影响。
+- 51 项 self-test 全程没抓到，是因为 `LoopbackProbe` 用 `port: 0` → `.any`，两处端口都是 `.any` 时不冲突。教训：测试必须覆盖**发布二进制实际使用的参数**，而不是测试方便的参数。
+- 用四组对照实测确认修复方向：`requiredLocalEndpoint(显式) + on:(显式)` = EINVAL；`requiredLocalEndpoint(显式)` 单独用可绑定但需 `newConnectionHandler` 才会 ready；`requiredLocalEndpoint(.any) + on:(显式)` 可绑定且实测 `lsof` 显示只监听 `127.0.0.1:47100`。采用最后一种。
+- 新增回归断言 `explicit loopback port binds and is reported`，已验证它在还原修复后确实 FAIL、修复后 PASS，self-test 从 51 增至 52 项。
+- 预留端口的辅助函数最初 flaky：`NWListener.cancel()` 是异步的，必须等到 `.cancelled` 状态才能重新绑定同一端口，否则第二个 listener 抢不到。
+- 模拟器与 Mac 共用网络栈，因此 `127.0.0.1` 即可完成真实端到端验证，不需要真机或同网段 Wi-Fi。
+- 实测行为闭环：handshake → authenticated → heartbeat 每 5 秒递增 → 用户 Disconnect → TTL 内复用同一 token 被拒为 `consumed` → 超过 180 秒复用被拒为 `expired`。listener 输出只含 8 位随机连接 ID，无 token、地址或消息内容，与安全合同一致。
+- **文档与实际行为不符**：服务端拒绝握手时直接关连接，不发 `DiagnosticError` 帧，所以 iPhone 对所有服务端拒绝都只显示 `Connection failed (network)`。原 `CONNECT_AND_TEST.md` 声称用户会看到 `authentication`/`expired`/`consumed`，实际看不到。已改为如实描述，并把"不向未认证对端透露拒绝原因"记为显式决策而非缺陷。
+- 自动化测试需要 listener 有真正的 controlling terminal 才能拿到 token（`/dev/tty` 守卫），用 `pty.fork()` 实现；这只用于本地测试脚本，没有改动生产代码的 token 显示约束。
+- `apple/Sources/QuadControlDiagnosticClient/` 是重构后遗留的空目录，`ARCHITECTURE.md` 仍按旧名描述；已删除目录并改为实际的 `QuadControlDiagnosticTransport` / `QuadControlDiagnosticServer`。

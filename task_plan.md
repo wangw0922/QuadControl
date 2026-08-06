@@ -2,7 +2,7 @@
 
 ## Task Status
 
-**Complete for the implemented M0 scope, with explicit toolchain blockers** — macOS 连接诊断闭环已完成并通过干净构建/self-test/独立终审；iOS 源码与真机步骤已完成，但完整 Xcode/签名/真机证据仍 Blocked；Rust/ADB 验证仍因工具链缺失 Blocked。没有宣称投屏或控制已实现。
+**Complete for the implemented M0 scope; iOS runtime evidence obtained on Simulator** — macOS 连接诊断闭环已完成并通过干净构建/XCTest/self-test/独立终审；iOS 已在 iPhone 17 (iOS 26.5) 模拟器完成构建、XCTest 与真实端到端连接验证，**真机签名与 on-device 运行仍未验证**；Rust/ADB 本机仍 Blocked（由 CI 覆盖）。本轮运行验证暴露并修复了一个 listener 显式端口绑定缺陷。没有宣称投屏或控制已实现。
 
 ## 目标
 
@@ -30,9 +30,11 @@
 | 5. 代码 vs 方案独立评审 | complete | 唯一 major 已修复；复核仅保留 Rust 实际验证阻塞 |
 | 6. Apple 闭环范围与工具盘点 | complete | 已读取插件 skill、确认工具状态并完成独立安全方案评审 |
 | 7. macOS 连接诊断端 | complete | SwiftPM build 与 51 项 self-test 断言通过；非交互 token 输出拒绝通过 |
-| 8. iOS SwiftUI 连接客户端 | complete (source) / blocked (runtime) | 源码、Info.plist、tests、XcodeGen scheme 与静态 parse/lint 通过；Xcode build/Simulator/签名/真机受环境阻塞 |
+| 8. iOS SwiftUI 连接客户端 | complete (simulator) / blocked (device) | XcodeGen 生成工程，iPhone 17 模拟器 `xcodebuild test` 通过 2 项；真机签名/on-device 仍未验证 |
 | 9. 连接与真机测试文档 | complete | 已给出 Mac+iPhone 真机步骤、预期日志、故障排查及 Android 当前只读 ADB 边界 |
 | 10. 主验收与独立一致性复核 | complete | 干净 Swift build、51 项 self-test、静态检查和非交互拒绝通过；独立终审 PASS，无 blocking/major/minor |
+| 11. 完整 Xcode 下的运行验证 | complete | XCTest 4 项、self-test 52 项、模拟器 `xcodebuild test` 2 项、模拟器↔Mac 真实握手/心跳/断开/复用拒绝全部通过 |
+| 12. listener 显式端口缺陷修复 | complete | 定位 EINVAL 根因，先补回归断言并验证其能抓 bug，修复后连跑 3 次稳定 PASS |
 
 ## 范围约束
 
@@ -81,3 +83,6 @@
 | Command Line Tools 同时缺少 `XCTest` 与 `Testing` 模块 | 1 | 不接受 `swift test` 的零测试退出 0；增加可执行 self-test 覆盖核心与 loopback，完整 Xcode 后再运行 XCTest/iOS tests |
 | 首次重构后 Swift build 报顶层 private 类型可见性及 throwing autoclosure 错误 | 1 | 将顶层实例收紧为 private，并先求值可抛表达式再断言；重跑 build 通过 |
 | 更新计划文件时 patch 上下文多写了“断开”一词而未命中 | 1 | 读取精确行后缩小 patch 上下文重试；没有产品代码受影响 |
+| 真实 listener 二进制启动即报 `listener failed: startup` | 1 | 定位为 loopback 模式下 `requiredLocalEndpoint` 与 `NWListener(on:)` 重复指定显式端口触发 EINVAL；改为只用 `on:` 指定端口 |
+| 首次探测脚本误判 `NWListener` 绑定方式全部失败 | 1 | 漏设 `newConnectionHandler` 导致 listener 永不 ready；补上后四组对照结果才可信 |
+| 端口预留辅助函数导致回归断言 flaky | 1 | `cancel()` 异步释放 socket，改为等待 `.cancelled` 状态后再复用端口 |
