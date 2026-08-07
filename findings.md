@@ -146,3 +146,17 @@
 - 两条合起来的教训：**这个测试文件的"写脚本再执行"模式在两个平台各有一种失败模式，且互不重叠**。只在一个平台验证会漏掉另一个。
 - 修法是有界重试，且只重试这一种错误签名，其余原样返回——绝不能顺手把超时和输出超限这些测试真正要断言的错误也吞掉。`SystemRunner` 走 `CommandRunner` 包装器；CLI 测试在子进程内部 exec，包装器够不着，改在进程层面按 stderr 签名重试。
 - `common` 模块被两个测试二进制各自编译、各只用一部分，`-D warnings` 会把未使用项报成 dead_code 错误。这是共享测试辅助模块的固有现象，加 `#![allow(dead_code)]` 并说明原因。
+
+## 2026-08-07 Android 设备端服务第一个纵切
+
+- 用户批准模式 B（ADB 推送 shell server）并要求把内部 API 的使用如实写进文档。已在 `PRODUCT_CONSTRAINTS.md` 中把它写成一条**明确的、有边界的例外**，而不是假装符合"不使用私有 API"：截屏、输入注入、物理熄屏都没有公开 API 等价物，这是该方案固有的。约束的其余部分（不绕锁屏、不无人值守、会话结束恢复原状、绝不上架分发）仍然绝对。
+- Shell server **不是 APK**：由 `app_process` 启动，不需要 manifest、资源、aapt2，因此也不需要 Gradle 和 Android 插件。只要 `android.jar`（编译期）+ `d8`（转 dex）。这比预想的轻很多。
+- 交付链路已跑通并验证清理：`build.sh` 产出 4.1 KB dex jar → `adb push` → `app_process` 启动 → JSON 输出 → 删除，`ls` 确认设备无残留。
+- **真机实测（三星 SM-S9180，Android 16 / SDK 36）**：
+  - 截屏：`SurfaceControl.getPhysicalDisplayIds()` **实际调用成功**，返回 1 个显示器。这是"真的能调"而非"符号存在"。
+  - 输入注入：**`InputManager.getInstance()` 抛 NullPointerException** —— 这条被广泛引用的路径在 Android 16 上已经死了。`ServiceManager.getService("input")` 能拿到 binder，即 scrcpy 用的那条路可用。
+  - 熄屏：`setDisplayPowerMode` 存在，按设计不调用。
+- 输入注入这条是本轮最有价值的发现：**照抄常见教程写 `getInstance()` 会在这台设备上直接崩**。这也再次印证了今天贯穿始终的那条——能力清单/教程与实测不是一回事。
+- 探测器刻意把 `class_present`、`method_present`、`verified_callable` 分三个字段报告，并对有副作用的方法（注入、熄屏）永远不调用、`verified_callable` 恒为 false 且在 JSON 里说明原因——不能让"没验证"看起来像"不支持"。
+- 我自己犯的一个小 bug：`Build.RELEASE` 写错了，`RELEASE` 在 `Build$VERSION` 上而非 `Build` 上，导致首轮报 `unknown`。已修。
+- 不报告设备序列号：桌面端本来就知道推给了哪台设备，与 ADB probe 的既有原则一致。

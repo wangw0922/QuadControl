@@ -9,3 +9,4 @@ DerivedData/
 *.swp
 .idea/
 .vscode/
+/agents/android-shell/server/build/

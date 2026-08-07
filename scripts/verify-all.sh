@@ -20,4 +20,12 @@ if command -v xcodegen >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1;
 else
   scripts/build-ios.sh
 fi
+# The device-side server builds without a device; build.sh reports SKIP itself when the
+# Android SDK is absent, so its own output is the report.
+out=$(agents/android-shell/server/build.sh 2>&1) || status=1
+case "$out" in
+  PASS*) echo "PASS: Android shell server dex build" ;;
+  SKIP*) echo "$out" ;;
+  *) echo "FAIL: Android shell server dex build" >&2; echo "$out" >&2; status=1 ;;
+esac
 exit "$status"
