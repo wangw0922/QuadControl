@@ -1,40 +1,44 @@
 # Status
 
-M0 foundation includes the workspace skeleton, source schema, documentation,
-platform-boundary notes, passive ADB probe, and an Apple user-initiated
-diagnostic listener/shared Swift package.
+M0. No screen mirroring or device control is implemented in any quadrant.
 
-Verified locally with full Xcode 26.6 (iOS 26.5 SDK):
+Control directions are fixed — see [control architecture](CONTROL_ARCHITECTURE.md):
+Windows/macOS→Android is self-built, Windows→iPhone goes through go-ios and
+WebDriverAgent, and macOS→iPhone uses Apple's iPhone Mirroring rather than
+anything of ours.
 
-- `swift build` and `swift test` pass; XCTest executes 4 assertions.
-- `QuadControlSelfTest` passes 62 assertions over real TCP loopback.
-- `xcodebuild test` on an iPhone 17 (iOS 26.5) Simulator passes 9
-  `ConnectionModelTests`.
-- Simulator end-to-end: handshake, authentication, 5-second heartbeats, user
-  disconnect, in-TTL token reuse rejected as `consumed`, post-TTL reuse rejected
-  as `expired`.
-- **Physical iPhone SE 3 (iPhone14,6, iOS 26.5)**: signed with a free personal
-  team, installed, and connected over real Wi-Fi LAN — not loopback. The iOS
-  local-network permission prompt was accepted and the session authenticated and
-  heartbeated. Verified twice: once with a typed token, once by scanning the
-  listener's QR pairing code.
+## Done
 
-Listener output contains only short connection IDs — no token, address, or
-payload.
+- Rust workspace, cross-platform schema, repository skeleton, core documents.
+- Passive Android ADB capability probe with 24 tests. Cargo is unavailable on
+  the current host, so it is exercised by GitHub Actions rather than locally.
+- An Apple connection-diagnostic loop, verified end to end on a physical
+  iPhone SE 3 over Wi-Fi LAN, including QR pairing. **This is no longer on the
+  product path** — it was built to validate a self-built Mac↔iPhone link, which
+  the architecture change removed. It is kept as a diagnostic tool.
+- `QuadControlMacHIDProbe`, a read-only Bluetooth capability probe. The HID
+  direction it was built for has since been dropped.
+- Simplified Chinese and English localization for every UI string shipped so far.
 
-UI is localized for Simplified Chinese and English: the iOS app and the macOS
-listener's one-time-token block follow the system language, while stderr log
-lines stay English because docs and tests match on them.
+## Not started
 
-`QuadControlMacHIDProbe` covers the M0 "macOS Bluetooth HID" item as far as
-read-only observation allows: the controller supports the HID profile and all
-three peripheral-role APIs exist, but whether macOS will let a process act as a
-HID *peripheral* is reported `unknown` and stays **Blocked** pending an active,
-user-present experiment. See [macOS HID feasibility](MACOS_HID_FEASIBILITY.md).
+- Windows control client.
+- macOS control client.
+- Android target: screen capture, input injection, screen-off control.
+- Windows→iPhone: go-ios integration and desktop GUI. **The go-ios capability
+  list has not been verified on hardware by this project** — the first task is to
+  confirm screenshot and tap on a real device rather than restate its docs.
+- macOS→iPhone: detection and guidance for Apple's iPhone Mirroring.
 
-Rust remains **Blocked** locally where Cargo is unavailable; GitHub Actions
-covers `cargo metadata`, Clippy, and workspace tests. Android real-device
-behavior is **Blocked** without `adb` and a device.
+## Dropped
 
-No production UI, media stream, pairing, remote relay, device control, Android
-screen-off, ReplayKit, Screen Curtain, HID, or iOS P0 result is implemented.
+Bluetooth HID, ReplayKit broadcast extension, and Screen Curtain. Removed for
+loss of purpose, not because they were disproven — see
+[macOS HID feasibility](MACOS_HID_FEASIBILITY.md) for the honest state of what
+was and was not established.
+
+## Screen-off support is asymmetric
+
+Windows/macOS→Android: reachable. macOS→iPhone: expected to be covered by
+Apple's solution, unverified by us. Windows→iPhone: **not reachable**, decided
+by how XCUITest works.

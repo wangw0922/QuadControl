@@ -28,6 +28,17 @@
   language matching; each `.lproj` is declared with `.copy` instead.
 - A CLI has no application bundle, so `Bundle.module` string lookup ignores the
   user's languages. The listener resolves the best-matching `.lproj` explicitly.
+- **macOS→iPhone is not self-built.** Apple's iPhone Mirroring already covers it
+  officially and is the only form Apple permits; a self-built replacement would
+  be worse, more fragile, and undistributable. We detect and launch it, nothing
+  more — it has no public API.
+- **Windows→iPhone uses go-ios and WebDriverAgent**, driven as external processes
+  like `adb`. Its UI-automation ceiling and its signing/distribution limits are
+  accepted and must be disclosed to users, not designed around.
+- **Bluetooth HID, ReplayKit, and Screen Curtain were dropped for loss of
+  purpose, not because they failed.** Recording the distinction matters: if the
+  Apple and WDA paths ever fail, HID resumes from three specific unknowns rather
+  than from a false "already disproven".
 - The macOS HID probe stays passive like the ADB probe: one whitelisted read-only
   command plus Objective-C runtime introspection. It never publishes an SDP
   record, because doing so mutates system Bluetooth state.

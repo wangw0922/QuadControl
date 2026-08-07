@@ -1,5 +1,22 @@
 # Windows、macOS、Android、iPhone 四端通用控制软件制作计划
 
+> **2026-08-06 修订说明**
+>
+> 项目控制方向调整为下表。调整的理由是 Mac→iPhone 已由 Apple 官方方案覆盖、
+> Windows→iPhone 由 WebDriverAgent 覆盖，**蓝牙 HID 因此失去存在理由**——不是
+> 因为它被证伪。HID 的实测状态见 `docs/MACOS_HID_FEASIBILITY.md`：本地 API
+> 部分可用，手机侧从未验证。
+>
+> | 控制端 | 被控端 | 方案 |
+> |---|---|---|
+> | Windows / macOS | Android | 自研，完整控制含熄屏 |
+> | Windows | iPhone | go-ios + WebDriverAgent，不含熄屏 |
+> | macOS | iPhone | **Apple iPhone Mirroring**，不自研 |
+>
+> 权威依据见 [`docs/CONTROL_ARCHITECTURE.md`](docs/CONTROL_ARCHITECTURE.md)。
+> 本文与之冲突处以该文件为准。蓝牙 HID、ReplayKit 广播扩展、Screen Curtain
+> 三项已移出项目范围，下文相关章节仅作为决策过程的历史记录保留。
+
 ## 一、先明确项目能做到什么
 
 这个项目可以启动，但必须把“熄屏”和“锁屏”分开定义，否则 GPT-5.6 很容易写出看似完整、实际无法运行的方案。
@@ -26,6 +43,13 @@ Android路线相对明确。普通Android应用使用MediaProjection时，系统
 1. **确定交付路线**：Windows、Mac完整控制Android，Android物理熄屏后继续控制。
 2. **实验交付路线**：Windows、Mac控制iPhone，并尝试Screen Curtain熄屏控制。
 3. **Apple合作路线**：iPhone真正锁屏后仍能完整控制。
+
+> **修订（2026-08-06）**：第 2 条已终止，但**不是因为被证伪**。Mac→iPhone 改用
+> Apple 官方 iPhone Mirroring，Windows→iPhone 改用 WebDriverAgent，HID 与 Screen
+> Curtain 组合方案随之失去用途，主动移出范围。实际执行的替代是：
+> Windows→iPhone 走 go-ios + WebDriverAgent（可控制，但是 UI 自动化而非输入
+> 注入，且不支持熄屏）；Mac→iPhone 直接使用 Apple iPhone Mirroring。第 3 条
+> Apple 合作路线维持不变，仍未启动。
 
 ---
 
@@ -279,6 +303,11 @@ Android应用本身负责：
 
 ## 4. iPhone被控端
 
+> **本节已作废（2026-08-06）。** 项目不再自研 iOS 被控端应用。Windows→iPhone
+> 由 go-ios 安装并运行 WebDriverAgent，被控端不需要我们的 app；Mac→iPhone 使用
+> Apple iPhone Mirroring。ReplayKit 广播扩展一并移除。现行方案见
+> [`docs/CONTROL_ARCHITECTURE.md`](docs/CONTROL_ARCHITECTURE.md)。下文保留为历史记录。
+
 iOS应用由两个Target组成：
 
 ```text
@@ -340,6 +369,21 @@ ios/
 ---
 
 # 五、iPhone必须先完成的P0可行性实验
+
+> **本节已终止（2026-08-06）。** 下表保留为原始验收标准。实际处置：
+>
+> | 实验 | 处置 | 依据 |
+> |---|---|---|
+> | Mac软件HID | **中止，未完成** | 本地 API 部分实测可用：HID SDP 记录能发布并撤销，PSM 0x11/0x13 均能注册。**手机侧从未验证**——Class of Device 能否修改、能否进入可发现状态、iPhone 会不会配对，三项都还是未知。详见 `docs/MACOS_HID_FEASIBILITY.md` |
+> | Windows软件HID | **取消** | Windows→iPhone 改走 WDA，不再需要 HID |
+> | ReplayKit + Screen Curtain | **取消** | 输入通道不再走 HID，画面分别由 WDA 与 Apple 方案提供 |
+> | 其余各项 | **转移** | 随 WDA 路线重新定义，见 `docs/CONTROL_ARCHITECTURE.md` |
+>
+> 需要说明的是：中止 HID **不是因为它被证伪**，而是因为 Mac→iPhone 由 Apple 官方
+> 方案覆盖、Windows→iPhone 由 WDA 覆盖之后，它已经没有服务的目标。如果将来这两条
+> 路都走不通，HID 仍是一个未被否定的候选，届时需要从"手机侧未验证"这一步继续。
+>
+> 未采用原文"专用 USB/Bluetooth HID 硬件"这一项，因为它引入硬件依赖且已无必要。
 
 | 实验 | 通过标准 | 失败后的处理 |
 |---|---|---|
@@ -493,6 +537,10 @@ y: 0.0 ～ 1.0
 ---
 
 # 八、代码仓库结构
+
+> **修订（2026-08-06）。** `extensions/ios-broadcast` 已随 ReplayKit 出范围而
+> 移除；新增 `agents/ios-wda`，承载 Windows→iPhone 的 go-ios/WebDriverAgent
+> 集成。下方结构图其余部分仍然有效。
 
 ```text
 quadcontrol/
@@ -699,6 +747,15 @@ iPhone至少覆盖：
 - 用户可随时撤销USB和无线调试授权。
 
 ## iOS
+
+> **修订（2026-08-06）。** 我们不再发布 iOS 应用。iPhone 侧不存在需要上架的
+> QuadControl 组件：Windows 侧装的是 WebDriverAgent（开发者工具，无法上架，
+> 需用户自备签名），Mac 侧用的是 Apple 自带应用。因此下列条目仅剩两条仍然适用：
+> 只使用公开 API；不宣传"锁屏控制"。
+>
+> 需要向用户明确披露的新事实：Windows→iPhone 依赖 WebDriverAgent，属于开发者
+> 工具形态，需要开发者证书签名（免费账号签出的七天过期），**不能作为面向普通
+> 消费者的商店产品分发**。
 
 - App Store版本只使用公开API；
 - ReplayKit必须由用户启动；
@@ -926,6 +983,29 @@ M6：发布
 ---
 
 # 十三、最终推荐的产品发布路径
+
+> **修订（2026-08-06）。** P0 实验已完成，结论是 HID 路线不成立。修订后的发布
+> 路径为：
+>
+> **第一版**
+> - Windows、Mac 完整控制 Android，含实体熄屏后继续控制；
+> - Windows 经 go-ios + WebDriverAgent 查看并控制 iPhone（亮屏，UI 自动化级别）；
+> - Mac→iPhone 引导用户使用 Apple iPhone Mirroring，不自研。
+>
+> **第二版**
+> - Android 能力深化：音频、剪贴板、文件、录像、多设备；
+> - Windows→iPhone 的稳定性与签名体验改善（WDA 自动签名与续期）。
+>
+> **第三版**
+> - 跨网络远程连接、多设备管理、企业设备管理、账号与可信设备同步；
+> - Apple 正式授权路线（唯一能让 iPhone 真正锁屏后被完整控制的途径）。
+>
+> 下文保留原始版本划分作为历史记录。原文中"第二版"的四项已全部作废：Screen
+> Curtain 熄屏与 Mac 自研控制被实验证伪，外接 HID 硬件被主动放弃，Windows 控制
+> iPhone 提前到第一版但改由 WDA 实现。
+>
+> 本节最后一句的判断在事后被证明是对的：先做实验、后做界面，避免了在错误的
+> 底层假设上投入几个月。区别只在于实验结论是否定的。
 
 最稳妥的顺序是：
 

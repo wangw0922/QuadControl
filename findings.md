@@ -101,3 +101,12 @@
 - 结论：macOS 并未对第三方进程保留 HID service class 或 HID PSM。本地 API 这一半的答案是「可以」。
 - 仍未证明的是涉及手机的那一半，其中 **Class of Device 最可疑**：iPhone 按 CoD 过滤可配对配件，而 macOS 把自己报成 Computer，公共 API 中未找到修改入口。若改不了，SDP 记录再完整也可能不会被 iPhone 列为键盘。
 - 实验后状态已还原：所有记录已 remove，蓝牙仍为 `State: On` / `Discoverable: Off`，与实验前一致。
+
+## 2026-08-06 控制方向重构
+
+- iPhone Mirroring 本机核实：`/System/Applications/iPhone Mirroring.app` 存在，bundle id `com.apple.ScreenContinuity`，`LSMinimumSystemVersion` 26.5，**既无 URL scheme 也无公共 API**。该象限我们能做的仅限检测存在性、检测系统版本、`open -b` 调起、文档说明前提；试图驱动其界面既无接口也违反不用私有 API 的约束。
+- Apple 公开的使用前提（同一 Apple 账户、设备靠近、Wi-Fi 与蓝牙开启、iPhone 处于锁定）**本项目尚未实测**。其中"iPhone 保持锁定且不亮屏"若成立，等于该象限白拿了熄屏控制——这是自研方案从未做到的。
+- 原计划第五节其实预写了这个结局：停项条件里明确列出"Mac 用户调用 Apple 原生 iPhone 镜像"作为退路。所以这次不是推翻计划，是计划的分支被判定。
+- **一次自我纠正，值得记下来防止重犯**：改写文档时我把 HID 写成"实测证伪"。但我实测到的恰恰相反——SDP 记录发布成功、PSM 0x11/0x13 均注册成功；真正未验证的是 Class of Device、可发现状态、iPhone 是否会配对。中止 HID 的正确理由是**失去用途**（两个 iPhone 象限已被 Apple 方案和 WDA 覆盖），不是失败。这个区别会影响将来：若那两条路都断了，HID 应从"手机侧三项未知"继续，而不是被当成死路跳过。
+- 另一处纪律问题：我曾在对话中转述 Codex 的结论，但没有在工具结果里核对过原文；事后作业状态已被清除、日志文件不存在，无法取回。**这些未经核实的说法一律未写入文档。** 教训是转述前先读到原文，否则宁可不写。
+- go-ios 的能力清单同理——目前只有项目自述，本项目未实测。已在 `agents/ios-wda/README.md` 和 `IOS_FEASIBILITY.md` 中明确标注，并把"真机验证截图与点击"列为该象限第一项任务。今天 HID 的教训正好可以引用：能力清单说 API 存在、API 确实存在，方向照样没走通。

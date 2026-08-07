@@ -2,6 +2,22 @@
 
 M0 establishes a safe foundation only. The intended product is Windows/macOS control of user-authorized Android or iPhone sessions. Screen-off means the physical display is off while the device remains active; it is not system lock. No product feature may bypass a lock screen, password, Face ID, Touch ID, payment confirmation, or protected content.
 
+## Scope per quadrant
+
+Which quadrants this project implements, and which it delegates, is fixed in
+[control architecture](CONTROL_ARCHITECTURE.md). Two consequences bind product
+decisions:
+
+- **macOS→iPhone ships no control code.** Requirements for that quadrant are
+  limited to detecting Apple's iPhone Mirroring and guiding the user to it.
+  Proposals to automate or wrap it are out of scope, not merely unbuilt.
+- **Windows→iPhone cannot be a consumer product.** It requires a developer
+  certificate and a WebDriverAgent install. Any requirement assuming App Store
+  distribution or a zero-configuration setup does not apply there.
+
+Screen-off control is required for Android and is unreachable for
+Windows→iPhone. Requirements must not state it as a universal capability.
+
 ## Localization
 
 Every client UI — Windows, macOS, Android, iPhone — must support Simplified

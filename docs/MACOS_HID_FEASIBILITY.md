@@ -119,7 +119,18 @@ So macOS does not reserve the HID service class or the HID PSMs against
 third-party processes. The half of the question about local API access is
 answered: **yes**.
 
-## Active experiment — part 2 (outstanding)
+## Direction dropped 2026-08-06 — part 2 never ran
+
+Bluetooth HID was removed from the project before the second half of the
+experiment ran. The reason is **loss of purpose, not a negative result**:
+Mac→iPhone is now served by Apple's iPhone Mirroring and Windows→iPhone by
+WebDriverAgent, so HID no longer serves any quadrant. See
+[control architecture](CONTROL_ARCHITECTURE.md).
+
+Nothing below was disproven. If both of those paths ever fail, HID is still an
+open candidate and work resumes from exactly the three unknowns listed here.
+
+## Active experiment — part 2 (never ran)
 
 What is still unproven is the half that involves the phone:
 

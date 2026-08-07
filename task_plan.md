@@ -1,5 +1,12 @@
 # QuadControl 实施计划
 
+> **2026-08-06 方向变更。** 控制方向已重新定义，权威依据为
+> [`docs/CONTROL_ARCHITECTURE.md`](docs/CONTROL_ARCHITECTURE.md)：
+> Windows/macOS→Android 自研；Windows→iPhone 走 go-ios + WebDriverAgent；
+> macOS→iPhone 使用 Apple iPhone Mirroring，不自研。
+> 蓝牙 HID、ReplayKit 广播扩展、Screen Curtain 已移出范围——理由是失去用途，
+> 不是被证伪。下方阶段 1-18 记录的是变更前的执行过程，保留为历史。
+
 ## Task Status
 
 **Complete for the implemented M0 scope; iOS runtime evidence obtained on Simulator** — macOS 连接诊断闭环已完成并通过干净构建/XCTest/self-test/独立终审；iOS 已在 iPhone 17 (iOS 26.5) 模拟器完成构建、XCTest 与真实端到端连接验证，**真机签名与 on-device 运行仍未验证**；Rust/ADB 本机仍 Blocked（由 CI 覆盖）。本轮运行验证暴露并修复了一个 listener 显式端口绑定缺陷。没有宣称投屏或控制已实现。
@@ -15,7 +22,7 @@
 - ADB probe 位于 `agents/android-shell/adb-probe`，能报告 adb 版本、已连接设备、USB/TCP/模拟器/未知传输类型和 mDNS 无线配对/连接服务；`pairing_service_advertised`、`connect_service_advertised`、`wireless_connected` 分开报告，`paired_with_this_host` 明确为当前只读探测不可可靠观测；adb 缺失或命令失败时返回清晰诊断。
 - ADB probe 测试覆盖正常、离线、未授权、USB、TCP、模拟器、未知传输、两类 mDNS 服务、畸形/重复/空输出、adb 缺失、非零退出、stderr、超时、子命令不支持、结构化输出和退出码。
 - Windows、macOS、Android、iOS 与 iOS Broadcast Extension 都有最小可编译工程的边界/命令说明；当前主机不可验证的平台不得标记已构建。
-- 仓库至少包含 `apps/{windows,macos,android,ios}`、`extensions/ios-broadcast`、`agents/android-shell`、`crates/{core,protocol,transport,crypto,media,pairing,diagnostics,ffi}`、`services/{signaling,relay}`、`tests/{protocol,integration,security,device-lab}`、`LICENSES`、`docs`、`scripts`；不依赖 Git 跟踪空目录，使用说明文件表达占位边界。
+- 仓库至少包含 `apps/{windows,macos,android,ios}`、`agents/{android-shell,ios-wda}`、`crates/{core,protocol,transport,crypto,media,pairing,diagnostics,ffi}`、`services/{signaling,relay}`、`tests/{protocol,integration,security,device-lab}`、`LICENSES`、`docs`、`scripts`；不依赖 Git 跟踪空目录，使用说明文件表达占位边界。（2026-08-06：`extensions/ios-broadcast` 随 ReplayKit 出范围而移除，新增 `agents/ios-wda`。）
 - 核心文档逐项存在：`PRODUCT_REQUIREMENTS.md`、`PRODUCT_CONSTRAINTS.md`、`ARCHITECTURE.md`、`PROTOCOL.md`、`SECURITY.md`、`THREAT_MODEL.md`、`IOS_FEASIBILITY.md`、`ANDROID_COMPATIBILITY.md`、`DECISIONS.md`、`RISKS.md`、`STATUS.md`，并明确锁屏、熄屏、主动授权和实验能力边界。
 - `cargo metadata --no-deps --format-version 1`、`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`scripts/verify-all.sh` 在可用工具链范围内通过；脚本对缺失工具只可报告明确 `SKIP`，不能计为 `PASS`。
 

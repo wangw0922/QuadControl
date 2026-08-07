@@ -93,3 +93,15 @@
 - 已确认：HID service class `0x1124` 可发布并撤销；PSM `0x0011`/`0x0013` 均可注册。macOS 未对第三方保留 HID 角色。
 - 未确认：完整 HID 记录（report descriptor 等）、Class of Device 能否改（最可疑的阻塞点）、可发现状态控制、iPhone 是否会列出并配对。
 - 实验后蓝牙状态已还原，无残留进程与记录。
+
+## 2026-08-06 控制方向重构
+
+- 用户决定四象限方案：Windows/macOS→Android 自研；Windows→iPhone 走 go-ios + WebDriverAgent；**macOS→iPhone 使用 Apple 官方 iPhone Mirroring，不自研**。
+- 本机核实 iPhone Mirroring：存在于 `/System/Applications/`，bundle id `com.apple.ScreenContinuity`，`LSMinimumSystemVersion` 26.5，**无 URL scheme、无公共 API**。因此该象限我们只能检测与调起，不能编程控制。
+- 新建 `docs/CONTROL_ARCHITECTURE.md` 作为控制方向的唯一权威依据。
+- 原计划文档加修订说明，并改写第一节路线、第四.4 节 iPhone 被控端、第五节 P0 实验、第十一节 iOS 发布、第十三节发布路径。原文其余部分（Android 方案、安全设计、协议设计、测试矩阵）仍然有效，未改动。
+- **一次自我纠正**：初稿把 HID 写成"实测证伪"，但我实测到的恰恰相反——SDP 记录发布成功、两个 PSM 均注册成功；真正未验证的是 CoD、可发现状态和 iPhone 是否配对。已在计划、CONTROL_ARCHITECTURE、README、MACOS_HID_FEASIBILITY 四处改为"因失去用途而中止，非证伪"。
+- 同时发现：先前转述的 Codex 结论（bluetoothd 占用 PSM 等）无法取回原文核实（作业状态已清除），因此**未采信、未写入任何文档**。
+- 目录调整：移除 `extensions/ios-broadcast`（ReplayKit 出范围）；新增 `agents/ios-wda`（Windows→iPhone 象限）；改写 windows/macos/ios 三个 app README 以反映各自职责。
+- Apple 诊断栈与 iOS app 明确标注为**非产品路径**，保留为连接诊断工具。
+- 已更新 README、STATUS、ARCHITECTURE、DECISIONS、RISKS、PRODUCT_REQUIREMENTS、IOS_FEASIBILITY、MACOS_HID_FEASIBILITY、CONNECT_AND_TEST。

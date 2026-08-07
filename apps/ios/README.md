@@ -1,10 +1,21 @@
-# iOS diagnostic source
+# iOS diagnostic source — not on the product path
 
-`project.yml` is an XcodeGen source manifest that references the root Swift
-package. It has not generated an `.xcodeproj`, and no Xcode/Simulator/signing/
-device build is claimed. The SwiftUI app is manual host/port/token entry only;
-it persists no token and has no Bonjour declaration, ReplayKit, screen sharing,
-control, clipboard, or files. It accepts only numeric loopback/private/link-local
-hosts and disconnects when the app leaves the active scene. Generate and test
-it using `docs/CONNECT_AND_TEST.md`; full Xcode and user-owned signing are
-required.
+**The project no longer ships an iOS application.** Neither iPhone quadrant needs
+one: Windows→iPhone installs WebDriverAgent via go-ios, and macOS→iPhone uses
+Apple's iPhone Mirroring. See [control architecture](../../docs/CONTROL_ARCHITECTURE.md).
+
+What remains here is the diagnostic client built to validate a self-built
+Mac↔iPhone link before that link was removed from the architecture. It is kept
+because it is the only component in this repository with real-device end-to-end
+verification — signed and installed on an iPhone SE 3, connected over Wi-Fi LAN,
+with QR pairing — and it is useful for diagnosing LAN connectivity.
+
+It must not be described as a product capability.
+
+`project.yml` is an XcodeGen source manifest referencing the root Swift package;
+the generated `.xcodeproj` is not committed. Real-device builds take the
+development team on the command line rather than storing personal signing
+information in the repository.
+
+If the diagnostic loop stops earning its keep, this directory and the
+`QuadControlDiagnostic*` targets can be removed together.
