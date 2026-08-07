@@ -105,3 +105,17 @@
 - 目录调整：移除 `extensions/ios-broadcast`（ReplayKit 出范围）；新增 `agents/ios-wda`（Windows→iPhone 象限）；改写 windows/macos/ios 三个 app README 以反映各自职责。
 - Apple 诊断栈与 iOS app 明确标注为**非产品路径**，保留为连接诊断工具。
 - 已更新 README、STATUS、ARCHITECTURE、DECISIONS、RISKS、PRODUCT_REQUIREMENTS、IOS_FEASIBILITY、MACOS_HID_FEASIBILITY、CONNECT_AND_TEST。
+- 经 PR #6 合并到 `main`（squash `89ab5aa`），CI 双绿。
+
+## 2026-08-07 go-ios / WDA 真机实测
+
+- 安装 go-ios v1.2.1（SHA256 `52acff5c…`），USB 直连 iPhone SE 3 实测。
+- 确认隧道可用 `--userspace` 免 root 建立；设备信息读取不需要隧道。
+- 截图实测：解锁时 750×1334 真实画面，约 0.4 秒/张，连拍 5 张 2.04 秒（约 2.4 fps）。
+- WebDriverAgent 用免费个人 Team 编译签名成功并安装到真机，WDA HTTP API 正常响应。
+- 发现三种静默失败模式（锁屏截图全黑不报错、无焦点输入静默丢弃、锁屏启动 app 明确报错），已作为客户端设计约束写入 `agents/ios-wda/README.md`。
+- 首轮 tap/homescreen 失败经查为**我的 endpoint 写错**（WDA 16.x tap 走 W3C actions、homescreen 是顶层路径），非能力缺失；已明确区分，避免重蹈 HID 误判。
+- 已把转述的能力清单替换为实测表格。用正确 endpoint 复测后 tap、homescreen 均通过，确认首轮失败是调用写错而非能力缺失。
+- 文字输入找到可靠路径：`/wda/keys` 恒返回成功但文字永不到达（有无焦点均如此，设备启用中文拼音输入法）；改用 `/element/active` + `/element/{id}/value` 一次成功。
+- 该象限设备侧验证至此完成。**Windows 侧隧道驱动与 usbmuxd 仍需一台 Windows 才能验证。**
+- 测试反复被手机自动锁定打断（三次），该现象本身已作为运行层面约束记录。

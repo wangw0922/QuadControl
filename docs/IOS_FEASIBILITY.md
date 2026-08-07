@@ -36,10 +36,29 @@ Honest limits, all of which must reach the user before they install anything:
 - **No screen-off control.** XCUITest cannot drive the UI or capture the screen
   while the display is off or locked.
 
-The capability list above comes from the go-ios project's own description and has
-**not been verified on hardware by this project**. The first task in this
-quadrant is to confirm screenshot and tap on a real iPhone and record measured
-results, the same way the ADB and Bluetooth probes were handled.
+Most of this is now **measured rather than restated** — see
+[the agent boundary](../agents/ios-wda/README.md) for the full table. Headlines
+from an iPhone SE 3 on iOS 26.5 with go-ios v1.2.1:
+
+- device info needs no tunnel; the iOS 17+ tunnel runs **without root** via
+  `--userspace`, which removes what looked like an admin-privileges blocker;
+- screenshots return real 750×1334 content when unlocked, at roughly **2.4 fps**
+  — the first hard performance number this project has for the quadrant;
+- WebDriverAgent builds and signs with a **free personal team** and installs even
+  while the phone is locked, but cannot launch an app while locked.
+
+Tap, swipe, home, and text input are all confirmed working — with one trap:
+`/wda/keys` returns success and never delivers the characters, so text must go
+through element `setValue`. The device ran the Simplified Chinese Pinyin IME,
+this project's default user configuration.
+
+The important finding is not a capability but a failure taxonomy. A locked phone
+yields a silent all-black screenshot, and `wda/keys` silently swallows text, while
+launching an app fails loudly. A client cannot infer "connected and working" from
+call success — it has to verify effects.
+
+Windows-specific plumbing — the tunnel driver and usbmuxd on Windows — is still
+unverified and needs a Windows host.
 
 ## What is closed
 
