@@ -9,8 +9,8 @@
 
 | 控制端 | 被控端 | 方案 | QuadControl 负责什么 |
 |---|---|---|---|
-| Windows | Android | 自研（ADB / scrcpy 式） | 全部：画面、输入、文件、熄屏 |
-| macOS | Android | 自研（ADB / scrcpy 式） | 全部：画面、输入、文件、熄屏 |
+| Windows | Android | 自研，分两层（见下） | 全部：画面、输入、文件、熄屏 |
+| macOS | Android | 自研，分两层（见下） | 全部：画面、输入、文件、熄屏 |
 | Windows | iPhone | go-ios + WebDriverAgent | 客户端与桌面 GUI |
 | macOS | iPhone | **Apple iPhone Mirroring** | **不自研**，只做可用性检测与引导 |
 
@@ -38,6 +38,41 @@ Apple 在 macOS 15 / iOS 18 起提供 iPhone Mirroring，官方实现了投屏�
 需要同一 Apple 账户、两台设备靠近、Wi-Fi 与蓝牙开启、iPhone 处于锁定状态。
 其中"iPhone 保持锁定且屏幕不亮"这一条如果成立，意味着 Mac→iPhone 这一格
 天然满足了熄屏控制需求，而这是我们自研方案从未做到过的。
+
+## Android 分两层（2026-08-07 修订）
+
+原计划直接照 scrcpy 走 Android 内部 API。真机勘探推翻了这个前提：三星
+SM-S9180（Android 16）上 `SurfaceControl.createDisplay` 与 `setDisplaySurface`
+**根本不存在**，AOSP 的 `ScreenCapture` 内部嵌套类也全部缺失，取而代之的是一套
+带 `Sem` 前缀的三星定制接口。第一台测试设备就偏离了 AOSP，说明"照抄 scrcpy"
+要为每个 OEM 重做一遍勘探。
+
+改为两层：
+
+**第一层：官方命令打底。** `adb exec-out screenrecord --output-format=h264
+--time-limit 0 -` 与 `adb shell input`。全部是官方 shell 工具，零内部 API，
+所有安卓设备行为一致。
+
+本机实测（三星 SM-S9180 / Android 16）：
+
+| 项 | 实测值 |
+|---|---|
+| H.264 流 | 1280×596 @ 25 fps，ffprobe 确认有效 |
+| 首字节延迟 | 0.37 秒 |
+| 流式性 | 持续输出约 500 KB/s，非录完才给 |
+| 时长限制 | `--time-limit 0` 官方支持无限 |
+| 单张截图 | 3088×1440，1.42 秒/张 |
+
+代价如实记录：`input` 每次事件要起一个进程，比直接注入慢；**熄屏后继续操作
+这一层做不到**。
+
+**第二层：内部 API 作为可选增强。** 仅在探测到某设备支持时启用，用于降低延迟和
+实现熄屏。探测不到就自动退回第一层，而不是整个功能失效。这正是
+`agents/android-shell/server` 的能力探测器存在的理由——它从"锦上添花"变成了
+分层调度的前提。
+
+这样排序的理由：第一层能在任何安卓设备上工作，能远早地交付一个真能用的东西；
+熄屏是最难也最不稳的一块，推后不阻塞其余功能。
 
 ## 为什么 Windows→iPhone 走 go-ios / WebDriverAgent
 
