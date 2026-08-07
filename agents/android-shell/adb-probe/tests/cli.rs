@@ -4,17 +4,18 @@ mod common;
 
 use std::process::Command;
 
-use common::{successful_adb, FakeAdb};
+use common::{cli_output_retrying_text_file_busy, successful_adb, FakeAdb};
 
 const CLI: &str = env!("CARGO_BIN_EXE_quadcontrol-adb-probe");
 
 #[test]
 fn cli_returns_zero_and_json_for_a_successful_probe() {
     let fake = successful_adb();
-    let output = Command::new(CLI)
-        .env("PATH", fake.directory())
-        .output()
-        .unwrap();
+    let output = cli_output_retrying_text_file_busy(|| {
+        let mut command = Command::new(CLI);
+        command.env("PATH", fake.directory());
+        command
+    });
 
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stderr.is_empty());
@@ -26,10 +27,11 @@ fn cli_returns_zero_and_json_for_a_successful_probe() {
 #[test]
 fn cli_returns_one_and_stderr_when_adb_fails() {
     let fake = FakeAdb::new("printf 'version failed' >&2; exit 7");
-    let output = Command::new(CLI)
-        .env("PATH", fake.directory())
-        .output()
-        .unwrap();
+    let output = cli_output_retrying_text_file_busy(|| {
+        let mut command = Command::new(CLI);
+        command.env("PATH", fake.directory());
+        command
+    });
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
@@ -42,10 +44,11 @@ fn cli_returns_one_and_stderr_when_adb_fails() {
 fn cli_returns_one_when_adb_is_missing() {
     let empty_path = FakeAdb::new("");
     std::fs::remove_file(empty_path.executable()).unwrap();
-    let output = Command::new(CLI)
-        .env("PATH", empty_path.directory())
-        .output()
-        .unwrap();
+    let output = cli_output_retrying_text_file_busy(|| {
+        let mut command = Command::new(CLI);
+        command.env("PATH", empty_path.directory());
+        command
+    });
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8(output.stderr)

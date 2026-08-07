@@ -119,3 +119,15 @@
 - 文字输入找到可靠路径：`/wda/keys` 恒返回成功但文字永不到达（有无焦点均如此，设备启用中文拼音输入法）；改用 `/element/active` + `/element/{id}/value` 一次成功。
 - 该象限设备侧验证至此完成。**Windows 侧隧道驱动与 usbmuxd 仍需一台 Windows 才能验证。**
 - 测试反复被手机自动锁定打断（三次），该现象本身已作为运行层面约束记录。
+
+## 2026-08-07 Android 真机与 Rust 工具链闭合
+
+- 用户接入三星 SM_S9180（Galaxy S23），USB 连接。
+- 安装 `android-platform-tools`（adb 1.0.41 / platform-tools 37.0.1）。
+- `brew install rust` 判定不可行：需 Homebrew llvm 451 MB bottle，ghcr.io 实测 12 KB/s，约 10.7 小时。改用 rustup。
+- 应用户要求测了 8 个镜像：官方 `static.rust-lang.org` 754 KB/s 最快。**用户网络在美国**，官方源即最近源；我先前因手机运营商与系统语言误判为国内网络，已更正。
+- Rust 1.97.1 装成，`cargo test --workspace` **27 项全通过**（原 24 + 新增 3 项真机固件），为 8 月 4 日以来首次在本机执行。
+- 真机 probe 输出正确：`transport: usb`、`wireless_connected: false`、`paired_with_this_host: unknown`。
+- 新增三条真机固件测试：`device` 状态行（含与状态关键字撞名的 `device:dm3q` 字段）、`unauthorized` 状态行、四行版本输出。序列号已脱敏。
+- **恢复 `cargo fmt` CI 门禁**：实际差异仅 44 行、6 处、纯换行折叠；格式化后测试与 clippy 均通过。
+- **`scripts/verify-all.sh` 首次全绿**：10 项全 PASS，无 BLOCKED / SKIP / FAIL。

@@ -33,6 +33,9 @@ jobs:
       - name: Validate workspace metadata
         run: cargo metadata --no-deps --format-version 1
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

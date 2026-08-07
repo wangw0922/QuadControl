@@ -9,7 +9,7 @@
 
 ## Task Status
 
-**Complete for the implemented M0 scope; iOS runtime evidence obtained on Simulator** — macOS 连接诊断闭环已完成并通过干净构建/XCTest/self-test/独立终审；iOS 已在 iPhone 17 (iOS 26.5) 模拟器完成构建、XCTest 与真实端到端连接验证，**真机签名与 on-device 运行仍未验证**；Rust/ADB 本机仍 Blocked（由 CI 覆盖）。本轮运行验证暴露并修复了一个 listener 显式端口绑定缺陷。没有宣称投屏或控制已实现。
+**M0 探测与诊断能力已全部经真机验证；投屏与控制尚未开始。** `scripts/verify-all.sh` 首次全绿（10 项 PASS，无 BLOCKED/SKIP/FAIL）。Android 被动探测经三星真机验证；Windows→iPhone 的 go-ios/WDA 设备侧能力经 iPhone SE 3 验证；Apple 诊断闭环经真机 Wi-Fi 验证但已不在产品路径上。没有宣称投屏或控制已实现。
 
 ## 目标
 
@@ -47,7 +47,9 @@
 | 15. 扫码配对 | complete | `.proto` 先定义载荷；Mac CoreImage 终端二维码 + 地址解析；iOS 相机扫码，真机验证通过 |
 | 16. M0：macOS 蓝牙 HID 能力检测 | complete (只读) / blocked (外设角色) | `QuadControlMacHIDProbe` 报告控制器 HID 支持与三个外设角色 API 均存在；`can_act_as_hid_peripheral` 恒为 `unknown`，需用户在场的主动实验 |
 | 17. HID 主动实验第一部分：本地 API | complete | 确认必须打成 app bundle 并经 LaunchServices 启动（否则 TCC 直接 SIGABRT）；HID SDP 记录发布成功并可撤销；PSM 0x11/0x13 均可注册 |
-| 18. HID 主动实验第二部分：手机侧 | pending | 需完整 HID 记录（report descriptor 等）+ 解决 Class of Device 与可发现状态，再由 iPhone 实际尝试配对 |
+| 18. HID 主动实验第二部分：手机侧 | cancelled | 方向变更后 HID 移出范围；原定内容是补完整 HID 记录、解决 CoD 与可发现状态，再由 iPhone 尝试配对 |
+| 19. Windows→iPhone 设备侧验证 | complete | go-ios + WDA 真机实测：截图约 2.4 fps、tap/swipe/home 可用、文字须走 element setValue |
+| 20. Android 真机与 Rust 工具链 | complete | 27 项 cargo 测试本机通过；真机 probe 输出正确；恢复 `cargo fmt` 门禁；`verify-all.sh` 首次全绿 |
 
 ## 范围约束
 

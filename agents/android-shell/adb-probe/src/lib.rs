@@ -52,7 +52,10 @@ impl fmt::Display for ExecutionError {
             Self::TimedOut(command) => write!(f, "adb {command:?} timed out"),
             Self::Io(error) => write!(f, "adb process error: {error}"),
             Self::OutputTooLarge(command) => {
-                write!(f, "adb {command:?} exceeded the {OUTPUT_LIMIT}-byte output limit")
+                write!(
+                    f,
+                    "adb {command:?} exceeded the {OUTPUT_LIMIT}-byte output limit"
+                )
             }
         }
     }
@@ -344,7 +347,11 @@ pub fn parse_mdns(stdout: &str) -> MdnsReport {
     let mut connect_service_advertised = false;
     let mut malformed_lines = 0;
 
-    for line in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         if line == "List of discovered mdns services" {
             continue;
         }
@@ -416,9 +423,9 @@ pub fn run_probe(runner: &dyn CommandRunner) -> Result<ProbeReport, ProbeError> 
         return Err(command_failure(AdbCommand::MdnsServices, mdns_output));
     };
 
-    let wireless_connected = devices.iter().any(|device| {
-        device.transport == Transport::Tcp && device.state == DeviceState::Device
-    });
+    let wireless_connected = devices
+        .iter()
+        .any(|device| device.transport == Transport::Tcp && device.state == DeviceState::Device);
 
     Ok(ProbeReport {
         adb_version,
@@ -631,6 +638,57 @@ mod tests {
         assert_eq!(devices[4].state, DeviceState::Other("recovery".to_owned()));
     }
 
+    /// Captured verbatim from a Samsung Galaxy (SM_S9180) over USB with
+    /// platform-tools 37.0.1, except that the serial is redacted — this project does
+    /// not persist device identifiers. Real output carries `model:` and `device:`
+    /// fields the hand-written fixtures never had, and `device:dm3q` collides with the
+    /// `device` state keyword. Parsing is positional, so it survives; this test keeps
+    /// it that way.
+    #[test]
+    fn parses_real_hardware_device_line() {
+        let devices = parse_devices(concat!(
+            "List of devices attached\n",
+            "REDACTEDSERIAL         device usb:1048576X product:dm3qzcx ",
+            "model:SM_S9180 device:dm3q transport_id:1\n",
+        ))
+        .unwrap();
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].state, DeviceState::Device);
+        assert_eq!(devices[0].transport, Transport::Usb);
+        assert_eq!(devices[0].serial, "REDACTEDSERIAL");
+    }
+
+    /// The same handset before the user approved the USB-debugging prompt. Real
+    /// unauthorized lines still carry `usb:` evidence but none of the product fields.
+    #[test]
+    fn parses_real_hardware_unauthorized_line() {
+        let devices = parse_devices(concat!(
+            "List of devices attached\n",
+            "REDACTEDSERIAL         unauthorized usb:1048576X transport_id:1\n",
+        ))
+        .unwrap();
+
+        assert_eq!(devices[0].state, DeviceState::Unauthorized);
+        assert_eq!(devices[0].transport, Transport::Usb);
+    }
+
+    /// Real `adb version` output is four lines. Only the first carries the bridge
+    /// version; the platform-tools build number on line two is deliberately not
+    /// reported.
+    #[test]
+    fn parses_real_hardware_version_output() {
+        let version = parse_version(concat!(
+            "Android Debug Bridge version 1.0.41\n",
+            "Version 37.0.1-15733141\n",
+            "Installed as /opt/homebrew/bin/adb\n",
+            "Running on Darwin 25.5.0 (arm64)\n",
+        ))
+        .unwrap();
+
+        assert_eq!(version, "1.0.41");
+    }
+
     #[test]
     fn rejects_empty_or_unframed_device_output() {
         for output in ["", "USB123 device usb:1-2\n"] {
@@ -709,10 +767,7 @@ mod tests {
                 AdbCommand::Version,
                 ok("Android Debug Bridge version 1.0.41\n"),
             ),
-            (
-                AdbCommand::DevicesLong,
-                ok("List of devices attached\n"),
-            ),
+            (AdbCommand::DevicesLong, ok("List of devices attached\n")),
             (
                 AdbCommand::MdnsServices,
                 Ok(CommandOutput {

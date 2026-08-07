@@ -10,8 +10,14 @@ anything of ours.
 ## Done
 
 - Rust workspace, cross-platform schema, repository skeleton, core documents.
-- Passive Android ADB capability probe with 24 tests. Cargo is unavailable on
-  the current host, so it is exercised by GitHub Actions rather than locally.
+- Passive Android ADB capability probe, 27 tests, **verified against a real
+  Samsung handset** in both `unauthorized` and `device` states. Real output
+  carries fields the hand-written fixtures lacked, including a `device:` field
+  that collides with the `device` state keyword; regression tests now pin it.
+- `scripts/verify-all.sh` is **fully green for the first time** — every Rust and
+  Apple check passes locally with nothing BLOCKED or SKIPPED. The `cargo fmt`
+  gate, dropped from CI in August when the repository did not satisfy stable
+  rustfmt, has been restored.
 - An Apple connection-diagnostic loop, verified end to end on a physical
   iPhone SE 3 over Wi-Fi LAN, including QR pairing. **This is no longer on the
   product path** — it was built to validate a self-built Mac↔iPhone link, which

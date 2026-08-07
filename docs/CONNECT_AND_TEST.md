@@ -165,4 +165,8 @@ Android 客户端和投屏/控制通道尚未实现，因此 Android **不能连
 cargo run -p quadcontrol-adb-probe -- --format json
 ```
 
-它只执行 `adb version`、`adb devices -l`、`adb mdns services`，不会自动 pair、connect、执行 shell 或修改设备。当前开发机缺少 Cargo 和 adb，因此 Rust build/tests 与 Android 真机输出仍是 **Blocked / 未在此机验证**。
+它只执行 `adb version`、`adb devices -l`、`adb mdns services`，不会自动 pair、connect、执行 shell 或修改设备。
+
+**已在真机验证**（三星 SM_S9180，USB，platform-tools 37.0.1）：授权前的 `unauthorized` 与授权后的 `device` 两种状态都能正确识别，`transport` 报 `usb`，`wireless_connected` 报 `false`，`paired_with_this_host` 保持 `unknown`。详见 [Android 兼容性](ANDROID_COMPATIBILITY.md)。
+
+若 `adb devices -l` 显示 `unauthorized`，说明手机上的「允许 USB 调试」弹窗还没确认；没有弹窗则说明开发者选项里的 USB 调试尚未打开。
