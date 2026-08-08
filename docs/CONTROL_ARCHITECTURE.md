@@ -147,7 +147,7 @@ go-ios 的具体能力与 iPhone SE 3 的实测记录见 [STATUS.md](STATUS.md)�
 
 | 象限 | 熄屏控制 |
 |---|---|
-| Windows / macOS / Linux → Android | 可达（scrcpy `--turn-screen-off`，Mac 上待实测） |
+| Windows / macOS / Linux → Android | 可达（scrcpy `--turn-screen-off`；macOS 上已实测：屏灭后镜像与控制正常，2026-08-08，SM-S9180） |
 | macOS → iPhone | 由 Apple 方案覆盖（待实测确认） |
 | Windows / Linux → iPhone | **不可达**，WDA 机制决定 |
 

@@ -53,7 +53,7 @@ Mac↔iPhone protocol, and the self-built Android internal-API capture layer
 
 ## Screen-off support is asymmetric
 
-All desktops→Android: reachable via scrcpy `--turn-screen-off` (not yet
-exercised here). macOS→iPhone: expected covered by Apple's solution,
+All desktops→Android: reachable via scrcpy `--turn-screen-off` — verified on
+macOS 2026-08-08 (panel off, mirror and control unaffected). macOS→iPhone: expected covered by Apple's solution,
 unverified by us. Windows/Linux→iPhone: **not reachable**, decided by how
 XCUITest works.
