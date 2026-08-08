@@ -10,6 +10,8 @@ let package = Package(
         .library(name: "QuadControlDiagnosticTransport", targets: ["QuadControlDiagnosticTransport"]),
         .library(name: "QuadControlDiagnosticServer", targets: ["QuadControlDiagnosticServer"]),
         .library(name: "QuadControlHIDProbe", targets: ["QuadControlHIDProbe"]),
+        .library(name: "QuadControlAndroidVideo", targets: ["QuadControlAndroidVideo"]),
+        .executable(name: "QuadControlAndroidViewer", targets: ["QuadControlAndroidViewer"]),
         .executable(name: "QuadControlMacListener", targets: ["QuadControlMacListener"]),
         .executable(name: "QuadControlMacHIDProbe", targets: ["QuadControlMacHIDProbe"]),
         .executable(name: "QuadControlSelfTest", targets: ["QuadControlSelfTest"])
@@ -46,6 +48,21 @@ let package = Package(
         .target(
             name: "QuadControlHIDProbe",
             path: "apple/Sources/QuadControlHIDProbe"
+        ),
+        .target(
+            name: "QuadControlAndroidVideo",
+            path: "apple/Sources/QuadControlAndroidVideo",
+            exclude: ["README.md"]
+        ),
+        .executableTarget(
+            name: "QuadControlAndroidViewer",
+            dependencies: ["QuadControlAndroidVideo"],
+            path: "apple/Sources/QuadControlAndroidViewer"
+        ),
+        .testTarget(
+            name: "QuadControlAndroidVideoTests",
+            dependencies: ["QuadControlAndroidVideo"],
+            path: "apple/Tests/QuadControlAndroidVideoTests"
         ),
         .executableTarget(
             name: "QuadControlMacHIDProbe",

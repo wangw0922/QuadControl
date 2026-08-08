@@ -4,8 +4,8 @@ All control and capture require visible, user-initiated authorization. Hidden co
 
 ## Android internal APIs — an explicit, narrow exception
 
-The blanket "no private APIs" rule holds everywhere except one place, and
-pretending otherwise would be dishonest:
+Outside the explicitly bounded Android scrcpy exception below, no private or
+internal APIs are used anywhere in the product.
 
 **Android Mode B — the ADB-pushed shell server — uses Android internal APIs
 through reflection.** Screen capture (`SurfaceControl`), input injection
@@ -34,9 +34,19 @@ present-until-proven-absent on that specific handset.
 Rules that remain absolute even in Mode B: no lock-screen bypass, no capture
 without the user starting the session, no unattended default, and the device's
 original brightness, rotation, and timeout are restored when the session ends.
+**The device's display refresh rate is never modified** — an explicit user
+rule (2026-08-08); any frame-rate limiting happens on the encoder side.
+
+As of 2026-08-08 the Mode B implementation is **scrcpy** (Apache-2.0, adopted
+as an external engine rather than self-built — decision and evidence in
+CONTROL_ARCHITECTURE.md). scrcpy operates exactly within the Mode B bounds:
+pushed over user-authorized ADB for the session, runs at shell UID via
+app_process, removed on exit, never store-distributed. The wrapper, once built,
+must pin scrcpy ≥ 4.1 — the version verified on hardware; wrapping has not
+started yet (see STATUS.md), and we do not fork scrcpy.
 
 ## iOS
 
-No exception applies. iOS uses public frameworks only. Windows→iPhone goes
+No exception applies. iOS uses public frameworks only. Windows/Linux→iPhone goes
 through WebDriverAgent, which is Apple's own XCTest machinery; macOS→iPhone uses
 Apple's iPhone Mirroring and ships no control code of ours.

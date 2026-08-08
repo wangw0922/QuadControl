@@ -32,7 +32,7 @@
   officially and is the only form Apple permits; a self-built replacement would
   be worse, more fragile, and undistributable. We detect and launch it, nothing
   more — it has no public API.
-- **Windows→iPhone uses go-ios and WebDriverAgent**, driven as external processes
+- **Windows/Linux→iPhone uses go-ios and WebDriverAgent**, driven as external processes
   like `adb`. Its UI-automation ceiling and its signing/distribution limits are
   accepted and must be disclosed to users, not designed around.
 - **Bluetooth HID, ReplayKit, and Screen Curtain were dropped for loss of

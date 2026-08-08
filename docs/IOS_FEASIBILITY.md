@@ -17,7 +17,7 @@ Bluetooth on, iPhone locked — have **not been verified by this project**. If t
 "iPhone stays locked with its screen off" prerequisite holds, this quadrant gets
 screen-off control for free, which no self-built approach achieved.
 
-## Windows → iPhone
+## Windows/Linux → iPhone
 
 go-ios plus WebDriverAgent. Public frameworks only, no jailbreak, and every step
 requires explicit user authorization, so it stays inside the project's rules.

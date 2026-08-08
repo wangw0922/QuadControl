@@ -10,18 +10,18 @@ copy of session state, framing, or input encoding.
 
 Per-quadrant boundaries:
 
-- **→ Android** is self-built and is where the shared crates carry the most
-  weight: ADB transport, screen capture, input injection, screen-off control.
+- **→ Android** uses scrcpy as the engine; the product wrapper owns discovery,
+  launch configuration, cleanup, and the shared GUI.
   `agents/android-shell` holds the read-only ADB probe and, later, the device-side
   helper.
-- **Windows → iPhone** drives `go-ios` and WebDriverAgent as external processes,
+- **Windows/Linux → iPhone** drives `go-ios` and WebDriverAgent as external processes,
   the same way the ADB probe drives `adb`: a whitelisted, bounded subprocess with
   parsing kept separate from execution so it can be tested without hardware.
   WDA speaks its own HTTP protocol, so our `protocol` crate does not apply.
 - **macOS → iPhone** contains no control code at all. The only permitted actions
   are detecting `/System/Applications/iPhone Mirroring.app`, checking the system
   version, and launching it with `open -b com.apple.ScreenContinuity`. There is
-  no public API, and driving its UI would breach the no-private-API rule.
+  no public API, and driving its UI would breach the private-API constraint.
 
 `apple/Sources/QuadControlDiagnostic*`, `QuadControlMacListener`, and `apps/ios`
 implement a self-built Mac↔iPhone diagnostic link. That link is **not on the

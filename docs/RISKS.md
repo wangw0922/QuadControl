@@ -1,17 +1,16 @@
 # Risks
 
-- iOS Screen Curtain + ReplayKit and software HID are P0 experiments and blocked until physical-device tests.
+- iOS Screen Curtain, ReplayKit, and software HID are removed from product scope;
+  they are not pending implementation.
 - macOS carries the HID profile and the peripheral-role APIs, but the peripheral
   role itself is unproven. Do not plan Mac→iPhone HID control on API presence
   alone; it needs the active experiment in `MACOS_HID_FEASIBILITY.md`.
-- **Windows→iPhone depends on WebDriverAgent, a developer tool.** Signing expires
+- **Windows/Linux→iPhone depends on WebDriverAgent, a developer tool.** Signing expires
   (seven days on a free team), Apple can change XCTest behavior, and the quadrant
   can never be distributed through the App Store. This caps that quadrant at
   developer/technical-user reach.
-- **The go-ios capability list is unverified by this project.** Treat it as a
-  claim to test on hardware, not as a specification. Today's HID work is the
-  cautionary case: a restated capability list and a measured result are not the
-  same thing.
+- **go-ios is measured on an iPhone SE 3** for the capabilities recorded in
+  `STATUS.md`; Windows/Linux host plumbing and other devices remain unverified.
 - **macOS→iPhone depends entirely on an Apple feature we do not control.** If
   Apple changes or restricts iPhone Mirroring, that quadrant has no fallback of
   ours, because we deliberately built none.

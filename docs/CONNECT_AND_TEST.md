@@ -2,7 +2,7 @@
 
 > **范围说明（2026-08-06）。** 本文描述的 Apple 连接诊断闭环**已不在产品路径上**。
 > 它是为验证自研 Mac↔iPhone 链路而建的，而该链路已被架构调整移除：Mac→iPhone
-> 改用 Apple iPhone Mirroring，Windows→iPhone 改用 go-ios + WebDriverAgent。
+> 改用 Apple iPhone Mirroring，Windows/Linux→iPhone 改用 go-ios + WebDriverAgent。
 > 见 [控制架构决策](CONTROL_ARCHITECTURE.md)。
 >
 > 保留本文是因为这套诊断工具仍是仓库里唯一经过真机端到端验证的组件，可用于排查
@@ -154,7 +154,7 @@ iPhone 只会显示两类结果：本地输入校验失败，或 `Connection fai
 
 ## 7. Android 手机目前只能测试 ADB 就绪度
 
-Android 客户端和投屏/控制通道尚未实现，因此 Android **不能连接上述 Apple 诊断 listener**。现有 `quadcontrol-adb-probe` 只做只读准备检查。
+Android 的 scrcpy 投屏/控制通道与 Linux 控制端属于产品矩阵，但不连接上述 Apple 诊断 listener；本节的 `quadcontrol-adb-probe` 仍只做只读准备检查。
 
 1. 安装 Android Platform Tools 和 Rust。
 2. 在手机打开开发者选项与 USB 调试，用 USB 连接并在手机上明确批准这台电脑。

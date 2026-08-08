@@ -21,5 +21,5 @@ Two things real output has that the hand-written fixtures never did:
 `paired_with_this_host` stayed `unknown` against a real device, which is the
 intended answer — read-only probing cannot establish it.
 
-Other OEMs, wireless debugging, and any screen capture or input path remain
-unverified. Nothing beyond passive discovery is implemented.
+scrcpy screen capture and input have been verified on Samsung SM-S9180; other
+OEMs and Windows/Linux host paths remain expected-compatible but unverified.
