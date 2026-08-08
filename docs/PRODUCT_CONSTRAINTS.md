@@ -41,9 +41,9 @@ As of 2026-08-08 the Mode B implementation is **scrcpy** (Apache-2.0, adopted
 as an external engine rather than self-built — decision and evidence in
 CONTROL_ARCHITECTURE.md). scrcpy operates exactly within the Mode B bounds:
 pushed over user-authorized ADB for the session, runs at shell UID via
-app_process, removed on exit, never store-distributed. The wrapper, once built,
-must pin scrcpy ≥ 4.1 — the version verified on hardware; wrapping has not
-started yet (see STATUS.md), and we do not fork scrcpy.
+app_process, removed on exit, never store-distributed. The wrapper pins scrcpy
+≥ 4.1 and rejects prereleases — the version verified on hardware;
+the wrapper does not fork scrcpy.
 
 ## iOS
 

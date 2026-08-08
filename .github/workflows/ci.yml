@@ -16,8 +16,12 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: ubuntu-24.04
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -34,9 +38,11 @@ jobs:
         run: cargo metadata --no-deps --format-version 1
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-24.04'
         run: cargo fmt --all --check
 
       - name: Run Clippy
+        if: matrix.os == 'ubuntu-24.04'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust tests

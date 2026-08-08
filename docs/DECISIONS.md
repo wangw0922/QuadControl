@@ -1,6 +1,11 @@
 # Decisions
 
-- Use a std-only Rust workspace at M0 to avoid toolchain/network dependency expansion.
+- Use Rust's standard library plus the smallest target-specific platform crate where
+  process-group or console APIs require it: `libc` on Unix and `windows-sys` on
+  Windows. Each such dependency is listed at the use site; do not add a general
+  portability layer. The scrcpy wrapper depends on `adb-probe` for its shared
+  device parser; if a second shared consumer appears, split that parser into its
+  own crate.
 - Preserve Protocol Buffers as source schemas without requiring `protoc`.
 - Treat unsupported `adb mdns services` as partial diagnostic success; missing adb and failed core commands are errors.
 - Report `paired_with_this_host` as `Unknown` because read-only discovery cannot observe it reliably.

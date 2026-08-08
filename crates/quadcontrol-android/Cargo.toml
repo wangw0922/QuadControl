@@ -1,0 +1,25 @@
+[package]
+name = "quadcontrol-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "quadcontrol-scrcpy"
+path = "src/main.rs"
+
+[[bin]]
+name = "scrcpy-test-helper"
+path = "src/bin/scrcpy-test-helper.rs"
+
+[dependencies]
+quadcontrol-adb-probe = { path = "../../agents/android-shell/adb-probe" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }

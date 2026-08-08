@@ -28,6 +28,13 @@ Apple's iPhone Mirroring rather than anything of ours.
 - Rust workspace with cross-platform schema; passive Android ADB capability
   probe (27 tests, verified against the real handset); `scripts/verify-all.sh`
   fully green; Simplified Chinese + English localization for all shipped UI.
+- **QuadControl scrcpy wrapper** (`crates/quadcontrol-android`, lib + CLI
+  `quadcontrol-scrcpy`): adb unification via `ADB`, stable ≥4.1 pinning with
+  prerelease rejection, semantic passthrough filtering, signal-ladder /
+  Ctrl-Break lifecycle with layered cleanup contract. Smoke-tested on the real
+  handset over Wi-Fi, including double-signal escalation and no-orphan checks.
+  Windows/Linux real-device execution is not verified; macOS is the
+  development host.
 
 ## Not started
 
@@ -40,8 +47,6 @@ Apple's iPhone Mirroring rather than anything of ours.
 - **go-ios on Windows/Linux**: same status — cross-platform by design,
   verified here only via macOS.
 - macOS→iPhone: detection and guidance for Apple's iPhone Mirroring.
-- Wrapping scrcpy (launch flags, exit cleanup, version pinning) inside
-  QuadControl instead of asking the user to run it by hand.
 
 ## Dropped
 
