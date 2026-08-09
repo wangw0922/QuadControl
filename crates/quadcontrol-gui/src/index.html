@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuadControl</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">QUADCONTROL / G0</p>
+        <h1 data-i18n="title">QuadControl 控制台</h1>
+        <p class="lede" data-i18n="subtitle">跨平台桌面控制端空壳</p>
+      </header>
+
+      <section class="card" aria-labelledby="preview-title">
+        <div class="card-heading">
+          <h2 id="preview-title" data-i18n="preview">MJPEG 预览占位</h2>
+          <span class="badge" data-i18n="offline">未连接</span>
+        </div>
+        <!-- CSP reserves only self and localhost ports for the future WDA MJPEG stream. -->
+        <img class="preview" src="./assets/mjpeg-placeholder.svg" alt="MJPEG preview placeholder" />
+        <p class="hint" data-i18n="hint">后续切片将在这里显示本地 WDA MJPEG 流。</p>
+      </section>
+
+      <section class="card command-card" aria-labelledby="command-title">
+        <div>
+          <h2 id="command-title" data-i18n="command">后端连通性</h2>
+          <p id="ping-result" class="hint" data-i18n="ready">准备就绪</p>
+        </div>
+        <button id="ping-button" type="button" data-i18n="ping">Ping 后端</button>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["crates/quadcontrol-gui/src-tauri"]
 members = [
   "crates/core", "crates/protocol", "crates/transport", "crates/crypto",
   "crates/media", "crates/pairing", "crates/diagnostics", "crates/ffi",

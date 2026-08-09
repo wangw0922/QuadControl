@@ -41,7 +41,9 @@ Apple's iPhone Mirroring rather than anything of ours.
 - **Unified controller GUI** on each desktop (Windows, macOS, Linux): device
   discovery, pairing, engine launch/config/cleanup, iPhone-side integration.
   Today macOS has a working self-built viewer plus raw scrcpy; nothing is
-  unified yet, and Windows/Linux have no client at all.
+  unified yet, and Windows/Linux have no client at all. G0 (empty shell +
+  three-platform CI) is in progress; the reviewed slice plan is
+  [GUI_PLAN.md](GUI_PLAN.md).
 - **scrcpy on Windows/Linux**: expected to work (officially supported), not
   yet verified by this project.
 - **go-ios on Windows/Linux**: same status — cross-platform by design,

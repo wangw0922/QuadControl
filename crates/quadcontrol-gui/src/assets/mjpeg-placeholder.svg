@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" role="img" aria-label="MJPEG placeholder">
+  <defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#172a3a"/><stop offset="1" stop-color="#203b42"/></linearGradient></defs>
+  <rect width="1200" height="520" fill="url(#g)"/>
+  <path d="M0 390 260 210l180 120 170-150 310 210 280-170v300H0z" fill="#6ee7b7" opacity=".16"/>
+  <text x="600" y="270" fill="#d7fbe9" font-family="system-ui,sans-serif" font-size="34" text-anchor="middle">MJPEG / TEST FRAME</text>
+</svg>
