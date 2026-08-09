@@ -17,9 +17,14 @@ path = "src/bin/scrcpy-test-helper.rs"
 
 [dependencies]
 quadcontrol-adb-probe = { path = "../../agents/android-shell/adb-probe" }
+getrandom = "0.3"
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+
+[dev-dependencies]
+rqrr = "0.10.1"

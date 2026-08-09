@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub mod wireless;
+
 pub const MIN_SCRCPY: (u64, u64) = (4, 1);
 pub const STDERR_LIMIT: usize = 64 * 1024;
 
@@ -553,7 +555,7 @@ pub fn install_signal_handlers() {
 }
 #[cfg(not(any(unix, windows)))]
 pub fn install_signal_handlers() {}
-fn signal_requested() -> bool {
+pub fn signal_requested() -> bool {
     SIGNAL_COUNT.load(std::sync::atomic::Ordering::Relaxed) != 0
 }
 fn signal_escalated() -> bool {
