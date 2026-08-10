@@ -1,5 +1,8 @@
 # Status
 
+The end-to-end roadmap from the current state to the finished product — system
+boundaries and per-step acceptance criteria — is [MASTER_PLAN.md](MASTER_PLAN.md).
+
 Updated 2026-08-08. Control directions are fixed — see
 [control architecture](CONTROL_ARCHITECTURE.md): every desktop
 (Windows/macOS/Linux)→Android rides **scrcpy** as the engine;
