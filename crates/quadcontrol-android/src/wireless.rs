@@ -718,11 +718,7 @@ pub fn read_identity_or_unknown(adb: &Path, serial: &str) -> Option<String> {
 }
 
 pub fn read_ro_serialno(adb: &Path, serial: &str) -> Result<Option<String>, WirelessError> {
-    let (status, stdout, _) = run_adb(
-        adb,
-        &["-s", serial, "shell", "getprop", "ro.serialno"],
-        None,
-    )?;
+    let (status, stdout, _) = run_adb(adb, &["-s", serial, "shell", "getprop", "ro.serialno"])?;
     if status != 0 {
         return Ok(None);
     }
@@ -845,19 +841,19 @@ fn stderr_summary(stderr: &str, secret: &str) -> String {
     redacted.chars().take(512).collect()
 }
 
-fn run_adb(
-    adb: &Path,
-    args: &[&str],
-    stdin: Option<&str>,
-) -> Result<(i32, String, String), WirelessError> {
+/// stdin 恒为 `Stdio::null()`：唯一需要写 stdin 的是 `adb pair` 的密码，那条路
+/// 走 `PairProcess`。这里曾有过一个从未被调用的 `stdin: Option<&str>` 分支，写入
+/// 失败时直接 `?` 返回，跳过 kill + reap，与清理契约冲突；它同时还有更深的形状
+/// 问题——写入发生在 `collect_child` 启动 capture 读取线程和超时计时之前。若子
+/// 进程在读完 stdin 前先写满 stdout/stderr，而父进程又因 stdin 写入未能完整进入
+/// 管道而阻塞，双方就会互锁；此时超时计时尚未开始，也无从介入。既然没有调用者，
+/// 直接删掉该能力，让缺陷从构造上不存在。日后真需要 stdin，要连同并发读取与
+/// 写入超时一起设计。
+fn run_adb(adb: &Path, args: &[&str]) -> Result<(i32, String, String), WirelessError> {
     let mut command = Command::new(adb);
     command
         .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| {
@@ -867,11 +863,6 @@ fn run_adb(
             WirelessError::Io(e)
         }
     })?;
-    if let Some(secret) = stdin {
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(secret.as_bytes())?;
-        }
-    }
     collect_child(&mut child)
 }
 
@@ -931,12 +922,12 @@ pub struct AdbPrecheck {
 }
 
 pub fn check_adb(adb: &Path) -> Result<AdbPrecheck, WirelessError> {
-    let (status, stdout, _) = run_adb(adb, &["version"], None)?;
+    let (status, stdout, _) = run_adb(adb, &["version"])?;
     if status != 0 {
         return Err(WirelessError::CommandFailed("version".into()));
     }
     let version = require_supported_adb(&stdout)?;
-    let (status, stdout, stderr) = run_adb(adb, &["mdns", "check"], None)?;
+    let (status, stdout, stderr) = run_adb(adb, &["mdns", "check"])?;
     if status != 0 {
         let _ = (stdout, stderr);
         return Err(WirelessError::MdnsUnavailable);
@@ -950,11 +941,11 @@ pub fn check_adb(adb: &Path) -> Result<AdbPrecheck, WirelessError> {
 /// mDNS 不可用时的显式恢复入口。**必须由用户主动触发**——它会重启 adb
 /// server，短暂断开这台机器上其他 adb 会话，不能替用户做这个决定。
 pub fn restart_adb_server(adb: &Path) -> Result<(), WirelessError> {
-    let (status, _, stderr) = run_adb(adb, &["kill-server"], None)?;
+    let (status, _, stderr) = run_adb(adb, &["kill-server"])?;
     if status != 0 {
         return Err(WirelessError::CommandFailed(stderr));
     }
-    let (status, _, stderr) = run_adb(adb, &["start-server"], None)?;
+    let (status, _, stderr) = run_adb(adb, &["start-server"])?;
     if status != 0 {
         return Err(WirelessError::CommandFailed(stderr));
     }
@@ -978,7 +969,7 @@ pub fn pair(adb: &Path, endpoint: &str, password: &str) -> Result<String, Wirele
 }
 
 pub fn connect(adb: &Path, endpoint: &str) -> Result<(), WirelessError> {
-    let (status, _, stderr) = run_adb(adb, &["connect", endpoint], None)?;
+    let (status, _, stderr) = run_adb(adb, &["connect", endpoint])?;
     if status == 0 {
         Ok(())
     } else {
@@ -989,7 +980,7 @@ pub fn connect(adb: &Path, endpoint: &str) -> Result<(), WirelessError> {
 pub fn wait_for_guid(adb: &Path, guid: &str, timeout: Duration) -> Result<String, WirelessError> {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        let (status, stdout, stderr) = run_adb(adb, &["devices", "-l"], None)?;
+        let (status, stdout, stderr) = run_adb(adb, &["devices", "-l"])?;
         if status != 0 {
             return Err(WirelessError::CommandFailed(stderr));
         }
@@ -1048,7 +1039,7 @@ pub fn pairing_instructions() -> &'static str {
 }
 
 pub fn adb_mdns_services(adb: &Path) -> Result<Vec<MdnsService>, WirelessError> {
-    let (status, stdout, stderr) = run_adb(adb, &["mdns", "services"], None)?;
+    let (status, stdout, stderr) = run_adb(adb, &["mdns", "services"])?;
     if status != 0 {
         return Err(WirelessError::CommandFailed(stderr));
     }
