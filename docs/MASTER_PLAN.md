@@ -174,12 +174,13 @@ iPhone 的熄屏控制与商店分发、任何绕过锁屏/隐藏控制的能力
 
 - **CI-W**：Windows CI 腿恢复（9/1 托管分钟恢复后加回 `windows-2025`，或接入
   Windows 自托管 runner）。P2 的 `cfg(windows)` 代码与 P6 依赖它。
-- **CI-SPEED**：单个 PR 的墙钟约 25 分钟，偏慢。已做：`CARGO_TARGET_DIR` 移出
-  被 `git clean` 的目录，让自托管 runner 真正增量编译。待定（属 CI 门禁变更，
-  需走完整评审）：① Rust job 挪到空闲的 `qc-macos`，消掉与 GUI 的串行排队；
-  ② PR 阶段 GUI 只做 debug 构建/`cargo check`（门禁要证明的是"Linux 上能编译"，
-  release 构建属 P7 打包）；③ 提高 VM 的 4 核/4GB 配额（宿主 10 核/32GB）。
-  实测参照：同一冷编译 Mac 58s、VM 20 分钟以上。
+- **CI-SPEED**：**已解决**（2026-08-10）。把 `CARGO_TARGET_DIR` 移出被
+  `actions/checkout` 的 `git clean -ffdx` 清掉的目录后，自托管 runner 的增量编译
+  真正生效：单个 PR 的墙钟从约 25 分钟降到 **2 分钟以内**（GUI 21m24s → 1m11s，
+  Rust 2m5s → 42s，同一份纯文档变更前后对照）。
+  余下备选（当前不需要，若日后再变慢再考虑；属 CI 门禁变更需走完整评审）：
+  Rust job 挪到空闲的 `qc-macos` 以消掉串行排队；PR 阶段 GUI 改 debug 构建；
+  提高 VM 的 4 核/4GB 配额（宿主 10 核/32GB）。
 - **文档同步纪律**：每片合并同步 STATUS.md；架构级变化进 CONTROL_ARCHITECTURE.md；
   一次性决策进 DECISIONS.md。本文只在**路线本身变化**时修订。
 
