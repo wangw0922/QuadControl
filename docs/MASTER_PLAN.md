@@ -76,8 +76,8 @@ iPhone 的熄屏控制与商店分发、任何绕过锁屏/隐藏控制的能力
 本地 OFL 字体；A/B 目前接 mock 数据）；自托管 CI 全链路绿；设计交接包
 `design_handoff_quadcontrol_gui/` 入库（A–E 五界面规范）。
 
-在飞未合并：分支 `claude/wonderful-lalande-fa10f7`（删除 `run_adb` 未被调用的
-stdin 分支，sol 评审发现的潜伏缺陷，非当前可达路径）——见 P0。
+`run_adb` 未被调用的 stdin 分支已删除（#18，2026-08-10 合并）——sol 评审发现的
+潜伏缺陷，当时不可达。
 
 ## 四、分步计划
 
@@ -87,8 +87,7 @@ stdin 分支，sol 评审发现的潜伏缺陷，非当前可达路径）——�
 
 ### P0 收尾清理（当前批次遗留，短）
 
-- **P0.1 裁决 `run_adb` stdin 分支删除**：评审在飞分支、跑全套测试、走 PR。
-  【验收】合并或明确否决并记录理由。
+- ~~**P0.1 裁决 `run_adb` stdin 分支删除**~~：**已完成**（#18，2026-08-10）。
 - **P0.2 G0 Linux 运行时闭环**（GUI_PLAN G0 的未竟项）：在本地 Ubuntu VM 实跑
   GUI——WebKitGTK 窗口渲染中文、真 WDA MJPEG 流 ≥10fps 持续 5 分钟无泄漏。
   【验收】达标即 G0 关闭；触发 Slint 止损条件则按 GUI_PLAN 决策。
@@ -175,6 +174,12 @@ stdin 分支，sol 评审发现的潜伏缺陷，非当前可达路径）——�
 
 - **CI-W**：Windows CI 腿恢复（9/1 托管分钟恢复后加回 `windows-2025`，或接入
   Windows 自托管 runner）。P2 的 `cfg(windows)` 代码与 P6 依赖它。
+- **CI-SPEED**：单个 PR 的墙钟约 25 分钟，偏慢。已做：`CARGO_TARGET_DIR` 移出
+  被 `git clean` 的目录，让自托管 runner 真正增量编译。待定（属 CI 门禁变更，
+  需走完整评审）：① Rust job 挪到空闲的 `qc-macos`，消掉与 GUI 的串行排队；
+  ② PR 阶段 GUI 只做 debug 构建/`cargo check`（门禁要证明的是"Linux 上能编译"，
+  release 构建属 P7 打包）；③ 提高 VM 的 4 核/4GB 配额（宿主 10 核/32GB）。
+  实测参照：同一冷编译 Mac 58s、VM 20 分钟以上。
 - **文档同步纪律**：每片合并同步 STATUS.md；架构级变化进 CONTROL_ARCHITECTURE.md；
   一次性决策进 DECISIONS.md。本文只在**路线本身变化**时修订。
 
