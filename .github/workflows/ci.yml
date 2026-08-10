@@ -14,14 +14,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 跑在本机自托管 runner 上（私有仓库不计 Actions 分钟）：
+#   qc-ubuntu = 本地 Ubuntu 22.04 arm64 虚拟机，qc-macos = 本机 macOS arm64。
+# PR 只跑 ubuntu；push main 与手动触发跑 ubuntu + macOS。
+# Windows 暂无本地 runner，全矩阵里已移除——Windows 验证（含 G2 Job Object 真机）
+# 仍待 Actions 配额恢复或接入 Windows 主机后补。
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
-    runs-on: ${{ matrix.os }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["qc-ubuntu"]' || '["qc-ubuntu", "qc-macos"]') }}
+    runs-on: [self-hosted, "${{ matrix.os }}"]
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -38,74 +43,23 @@ jobs:
         run: cargo metadata --no-deps --format-version 1
 
       - name: Check formatting
-        if: matrix.os == 'ubuntu-24.04'
+        if: matrix.os == 'qc-ubuntu'
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        if: matrix.os == 'ubuntu-24.04'
+        if: matrix.os == 'qc-ubuntu'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust tests
         run: cargo test --workspace
-
-  apple:
-    name: Apple
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Print Apple toolchain versions
-        run: |
-          xcodebuild -version
-          swift --version
-
-      - name: Describe Swift package
-        run: swift package describe
-
-      - name: Build Swift package
-        run: swift build
-
-      - name: Run Swift package tests
-        run: swift test --enable-xctest
-
-      - name: Verify Swift tests were discovered
-        run: |
-          set -o pipefail
-          swift test list --skip-build --enable-xctest | grep -q 'testStrictTokenAndFrameBounds'
-
-      - name: Run diagnostic self-test
-        run: swift run QuadControlSelfTest
-
-      - name: Install XcodeGen
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-        run: |
-          brew install xcodegen
-          xcodegen --version
-
-      - name: Generate and build iOS project for testing
-        working-directory: apps/ios
-        run: |
-          xcodegen generate --spec project.yml
-          xcodebuild \
-            -project QuadControlIOS.xcodeproj \
-            -scheme QuadControlIOS \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            build-for-testing
 
   gui:
     name: GUI (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
-    runs-on: ${{ matrix.os }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["qc-ubuntu"]' || '["qc-ubuntu", "qc-macos"]') }}
+    runs-on: [self-hosted, "${{ matrix.os }}"]
     timeout-minutes: 30
     defaults:
       run:
@@ -120,7 +74,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          # ayatana 版是 Tauri v2 的官方前置依赖；旧的 libappindicator3-dev 与之冲突。
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Install Rust toolchain
         run: |

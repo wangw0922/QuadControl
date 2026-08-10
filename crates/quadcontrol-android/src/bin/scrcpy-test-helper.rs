@@ -106,6 +106,8 @@ fn fake_adb_pairing(mode: &str) -> bool {
         }
         "pair" => {
             // 记录本次 pair 的端点，供测试断言"每个端点都各起了一个进程"。
+            // 必须先落日志再读 stdin：败者会在胜者出线后被 round-close kill，
+            // 若把读 stdin 排在前面，它可能还没记账就吃到 SIGKILL。
             if let Ok(path) = std::env::var("QUADCONTROL_FAKE_PAIR_LOG") {
                 let endpoint = args.get(1).cloned().unwrap_or_default();
                 // 连 PID 一起记：测试要用它证明败者确实被 round-close 回收，
@@ -118,6 +120,11 @@ fn fake_adb_pairing(mode: &str) -> bool {
                     .open(path)
                     .and_then(|mut file| file.write_all(line.as_bytes()));
             }
+            // 真实 adb pair 会先从 stdin 读走配对密码；替身必须遵守同一协议，
+            // 否则可能在父进程 write_all 之前就退出，父进程拿到 EPIPE 并终结整轮
+            // （快机器上写入总能抢先，本地 arm64 虚拟机上 6 次挂 2 次）。
+            let mut password = String::new();
+            let _ = std::io::stdin().read_line(&mut password);
             if args.get(1).map(String::as_str) == Some("127.0.0.1:41002") {
                 if mode == "pair-service-lost" {
                     // 活过随后的 mDNS 失败再自行退出，并留下"我不是被杀的"证据。
@@ -132,6 +139,23 @@ fn fake_adb_pairing(mode: &str) -> bool {
                 // 竞争场景：永不返回，用来验证胜出后它会被 kill+reap。
                 loop {
                     thread::sleep(Duration::from_millis(50));
+                }
+            }
+            // 胜者出线即触发 round-close 去 kill 败者。若此刻败者还没来得及记账，
+            // 「每个端点都各起过一个 pair」这条证据就会随 SIGKILL 一起丢失——慢机器上
+            // 稳定复现。因此胜者先有界等待败者记完账，再宣告成功：等的正是测试要断言
+            // 的那个状态，不是拿 sleep 猜时间。
+            if mode == "pair-competition" {
+                if let Ok(path) = std::env::var("QUADCONTROL_FAKE_PAIR_LOG") {
+                    for _ in 0..500 {
+                        if std::fs::read_to_string(&path)
+                            .unwrap_or_default()
+                            .contains("127.0.0.1:41002")
+                        {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
                 }
             }
             println!("Successfully paired to 127.0.0.1:37145 [guid=adb-FAKEGUID-0001]");

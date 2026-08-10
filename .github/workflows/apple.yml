@@ -1,0 +1,75 @@
+# Apple job 单独成工作流，跑在本机自托管 runner qc-macos 上（不计 Actions 分钟）。
+# PR 只在 Apple 相关路径变更时触发；push main 与手动触发始终跑。
+# 已知边界（sol 评审确认接受）：paths 过滤只看 PR 前 300 个变更文件，本仓库 PR 远小于该规模。
+name: Apple
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "apple/**"
+      - "apps/ios/**"
+      - "Package.swift"
+      - ".github/workflows/apple.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple:
+    name: Apple
+    runs-on: [self-hosted, qc-macos]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Print Apple toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Describe Swift package
+        run: swift package describe
+
+      - name: Build Swift package
+        run: swift build
+
+      - name: Run Swift package tests
+        run: swift test --enable-xctest
+
+      - name: Verify Swift tests were discovered
+        run: |
+          set -o pipefail
+          swift test list --skip-build --enable-xctest | grep -q 'testStrictTokenAndFrameBounds'
+
+      - name: Run diagnostic self-test
+        run: swift run QuadControlSelfTest
+
+      - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate and build iOS project for testing
+        working-directory: apps/ios
+        run: |
+          xcodegen generate --spec project.yml
+          xcodebuild \
+            -project QuadControlIOS.xcodeproj \
+            -scheme QuadControlIOS \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing

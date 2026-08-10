@@ -7,31 +7,220 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <header>
-        <p class="eyebrow">QUADCONTROL / G0</p>
-        <h1 data-i18n="title">QuadControl 控制台</h1>
-        <p class="lede" data-i18n="subtitle">跨平台桌面控制端空壳</p>
-      </header>
+    <svg class="icon-library" aria-hidden="true">
+      <defs>
+        <symbol id="icon-smartphone" viewBox="0 0 24 24">
+          <rect x="5" y="2" width="14" height="20" rx="4"></rect>
+          <path d="M12 18h.01"></path>
+        </symbol>
+        <symbol id="icon-monitor" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="4"></rect>
+          <path d="M8 21h8M12 17v4"></path>
+        </symbol>
+        <symbol id="icon-camera" viewBox="0 0 24 24">
+          <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"></path>
+          <circle cx="12" cy="13" r="3"></circle>
+        </symbol>
+        <symbol id="icon-volume-2" viewBox="0 0 24 24">
+          <path d="M11 5 6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+        </symbol>
+        <symbol id="icon-moon" viewBox="0 0 24 24">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+        </symbol>
+        <symbol id="icon-plus" viewBox="0 0 24 24">
+          <path d="M5 12h14M12 5v14"></path>
+        </symbol>
+        <symbol id="icon-check" viewBox="0 0 24 24">
+          <path d="M20 6 9 17l-5-5"></path>
+        </symbol>
+        <symbol id="icon-qr-code" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="5" height="5" rx="1"></rect>
+          <rect x="16" y="3" width="5" height="5" rx="1"></rect>
+          <rect x="3" y="16" width="5" height="5" rx="1"></rect>
+          <path d="M21 16h-3a2 2 0 0 0-2 2v3M21 21v.01M12 7v3a2 2 0 0 1-2 2H7M3 12h.01M12 3h.01M12 16v.01M16 12h1M21 12v.01M12 21v-1"></path>
+        </symbol>
+      </defs>
+    </svg>
 
-      <section class="card" aria-labelledby="preview-title">
-        <div class="card-heading">
-          <h2 id="preview-title" data-i18n="preview">MJPEG 预览占位</h2>
-          <span class="badge" data-i18n="offline">未连接</span>
-        </div>
-        <!-- CSP reserves only self and localhost ports for the future WDA MJPEG stream. -->
-        <img class="preview" src="./assets/mjpeg-placeholder.svg" alt="MJPEG preview placeholder" />
-        <p class="hint" data-i18n="hint">后续切片将在这里显示本地 WDA MJPEG 流。</p>
-      </section>
+    <main class="app-shell">
+      <aside class="sidebar" aria-labelledby="device-list-title">
+        <h2 id="device-list-title" class="section-label" data-i18n="myDevices"></h2>
+        <nav id="device-list" class="device-list" data-i18n-aria-label="myDevices"></nav>
+        <button id="add-device" class="btn btn-secondary btn-block" type="button">
+          <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-plus"></use></svg>
+          <span data-i18n="addDevice"></span>
+        </button>
+      </aside>
 
-      <section class="card command-card" aria-labelledby="command-title">
-        <div>
-          <h2 id="command-title" data-i18n="command">后端连通性</h2>
-          <p id="ping-result" class="hint" data-i18n="ready">准备就绪</p>
+      <section class="session" aria-labelledby="session-device-name">
+        <header class="session-header">
+          <div class="session-identity">
+            <h1 id="session-device-name"></h1>
+            <span id="session-state" class="tag tag-accent-2"></span>
+            <span id="session-connection" class="tag tag-neutral"></span>
+          </div>
+          <div class="session-actions">
+            <button id="show-mirror" class="btn btn-secondary" type="button">
+              <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-monitor"></use></svg>
+              <span data-i18n="showMirror"></span>
+            </button>
+            <button id="disconnect" class="btn btn-disconnect" type="button" data-i18n="disconnect"></button>
+          </div>
+        </header>
+
+        <div class="session-content">
+          <section class="mirror-card card elev-sm" data-i18n-aria-label="mirrorDescription">
+            <div class="phone-placeholder">
+              <svg class="icon mirror-phone" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
+            </div>
+            <p class="mirror-copy" data-i18n="mirrorDescription"></p>
+          </section>
+
+          <div class="control-column">
+            <section class="control-card card elev-sm" data-i18n-aria-label="sessionControls">
+              <div class="control-row">
+                <svg class="icon control-icon" aria-hidden="true"><use href="#icon-volume-2"></use></svg>
+                <div class="control-copy">
+                  <h2 data-i18n="soundOutput"></h2>
+                  <p data-i18n="soundDescription"></p>
+                </div>
+                <div class="seg" role="radiogroup" data-i18n-aria-label="soundOutput">
+                  <label class="seg-opt">
+                    <input type="radio" name="sound-output" value="computer" checked />
+                    <span data-i18n="thisComputer"></span>
+                  </label>
+                  <label class="seg-opt">
+                    <input type="radio" name="sound-output" value="phone" />
+                    <span data-i18n="phone"></span>
+                  </label>
+                </div>
+              </div>
+              <div class="divider"></div>
+              <div class="control-row">
+                <svg class="icon control-icon" aria-hidden="true"><use href="#icon-moon"></use></svg>
+                <div class="control-copy">
+                  <h2 data-i18n="screenOff"></h2>
+                  <p data-i18n="screenOffDescription"></p>
+                </div>
+                <div class="seg" role="radiogroup" data-i18n-aria-label="screenOff">
+                  <label class="seg-opt">
+                    <input type="radio" name="screen-off" value="on" />
+                    <span data-i18n="on"></span>
+                  </label>
+                  <label class="seg-opt">
+                    <input type="radio" name="screen-off" value="off" checked />
+                    <span data-i18n="off"></span>
+                  </label>
+                </div>
+              </div>
+              <div class="divider"></div>
+              <div class="control-row">
+                <svg class="icon control-icon" aria-hidden="true"><use href="#icon-camera"></use></svg>
+                <div class="control-copy">
+                  <h2 data-i18n="captureScreen"></h2>
+                  <p data-i18n="captureDescription"></p>
+                </div>
+                <button class="btn btn-secondary" type="button" data-i18n="capture"></button>
+              </div>
+            </section>
+
+            <aside class="safety-card card">
+              <h2>
+                <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-check"></use></svg>
+                <span data-i18n="safetyTitle"></span>
+              </h2>
+              <p data-i18n="safetyDescription"></p>
+            </aside>
+          </div>
         </div>
-        <button id="ping-button" type="button" data-i18n="ping">Ping 后端</button>
       </section>
     </main>
+
+    <div id="pairing-backdrop" class="dialog-backdrop" hidden>
+      <section class="dialog" role="dialog" aria-modal="true" data-i18n-aria-label="pairingDialog">
+        <div id="pairing-steps" class="pairing-steps" aria-label=""></div>
+
+        <div id="pair-step-1" class="pair-view">
+          <h2 class="dialog-title" data-i18n="chooseDeviceTitle"></h2>
+          <p class="dialog-intro" data-i18n="chooseDeviceDescription"></p>
+          <div class="type-options" role="radiogroup" data-i18n-aria-label="chooseDeviceTitle">
+            <label class="type-option">
+              <input type="radio" name="device-type" value="android" checked />
+              <svg class="icon" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
+              <span><strong data-i18n="androidName"></strong><small data-i18n="androidPairing"></small></span>
+            </label>
+            <label class="type-option">
+              <input type="radio" name="device-type" value="iphone" />
+              <svg class="icon" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
+              <span><strong data-i18n="iphone"></strong><small data-i18n="iphonePairing"></small></span>
+            </label>
+          </div>
+          <div class="dialog-actions actions-end">
+            <button id="pair-next" class="btn btn-primary" type="button" data-i18n="next"></button>
+          </div>
+        </div>
+
+        <div id="pair-step-2" class="pair-view" hidden>
+          <h2 class="dialog-title" data-i18n="scanTitle"></h2>
+          <div id="scan-view">
+            <div class="scan-content">
+              <div class="qr-placeholder" role="img" data-i18n-aria-label="qrPlaceholder">
+                <svg class="icon qr-icon" aria-hidden="true"><use href="#icon-qr-code"></use></svg>
+                <span id="qr-countdown"></span>
+              </div>
+              <ol class="scan-instructions">
+                <li data-i18n="scanStepOne"></li>
+                <li data-i18n="scanStepTwo"></li>
+                <li data-i18n="scanStepThree"></li>
+              </ol>
+            </div>
+            <p class="network-note" data-i18n="networkNote"></p>
+            <div class="dialog-actions actions-between">
+              <button id="show-manual" class="link-button" type="button" data-i18n="manualLink"></button>
+              <div class="action-group">
+                <button class="btn btn-secondary pair-back" type="button" data-i18n="previous"></button>
+                <button class="btn btn-primary" type="button" disabled data-i18n="waitingScan"></button>
+              </div>
+            </div>
+          </div>
+
+          <form id="manual-form" hidden>
+            <p class="dialog-intro" data-i18n="manualDescription"></p>
+            <div class="manual-fields">
+              <label class="field">
+                <span data-i18n="hostLabel"></span>
+                <input class="input" name="host" type="text" required data-i18n-placeholder="hostPlaceholder" />
+              </label>
+              <label class="field">
+                <span data-i18n="portLabel"></span>
+                <input class="input" name="port" type="text" inputmode="numeric" required data-i18n-placeholder="portPlaceholder" />
+              </label>
+              <label class="field field-wide">
+                <span data-i18n="pairingCodeLabel"></span>
+                <input class="input" name="code" type="text" required data-i18n-placeholder="pairingCodePlaceholder" />
+              </label>
+            </div>
+            <div class="dialog-actions actions-end">
+              <button id="manual-back" class="btn btn-secondary" type="button" data-i18n="previous"></button>
+              <button class="btn btn-primary" type="submit" data-i18n="continue"></button>
+            </div>
+          </form>
+        </div>
+
+        <div id="pair-step-3" class="pair-view completion-view" hidden>
+          <div class="completion-icon">
+            <svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg>
+          </div>
+          <h2 class="dialog-title" data-i18n="pairingCompleteTitle"></h2>
+          <p class="dialog-intro" data-i18n="pairingCompleteDescription"></p>
+          <div class="dialog-actions actions-end">
+            <button class="btn btn-secondary pair-back" type="button" data-i18n="previous"></button>
+            <button id="pair-done" class="btn btn-primary" type="button" data-i18n="done"></button>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <script type="module" src="./main.js"></script>
   </body>
 </html>
