@@ -19,6 +19,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+quadcontrol-android = { path = "../../quadcontrol-android" }
+quadcontrol-adb-probe = { path = "../../../agents/android-shell/adb-probe" }
+serde = { version = "1", features = ["derive"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

@@ -5,18 +5,21 @@ const messages = {
     addDevice: "添加设备",
     android: "安卓",
     androidName: "Android",
+    ios: "iPhone",
     iphone: "iPhone",
-    pixelName: "Pixel 8",
-    galaxyName: "Galaxy S24",
-    iphoneName: "iPhone SE",
     controlling: "正在控制",
     available: "可连接",
-    needsPairing: "需要配对",
-    sessionActive: "会话进行中",
-    sessionAvailable: "设备可连接",
-    wifiLatency: "Wi-Fi · 延迟 38 ms",
-    wifiReady: "Wi-Fi · 尚未连接",
-    pairingRequired: "需要先完成配对",
+    unauthorized: "未授权（需在手机上允许调试）",
+    offline: "离线",
+    pairing_required: "需要配对",
+    other: "未知状态",
+    noDevices: "未发现设备",
+    err_adb_not_found: "没有找到 adb，请先安装 Android 平台工具后重试。",
+    err_adb_timed_out: "adb 响应超时，请拔插数据线或重启 adb 后重试。",
+    err_adb_failed: "读取安卓设备列表失败，请检查手机是否已开启 USB 调试。",
+    err_ios_not_found: "没有找到 go-ios，iPhone 暂时无法列出。",
+    err_ios_failed: "读取 iPhone 列表失败。",
+    err_unknown: "设备发现暂时不可用。",
     showMirror: "显示镜像窗口",
     disconnect: "断开连接",
     mirrorDescription: "手机画面在独立的镜像窗口中显示\n（scrcpy 实时画面 · 可直接点按操作）",
@@ -71,18 +74,21 @@ const messages = {
     addDevice: "Add device",
     android: "Android",
     androidName: "Android",
+    ios: "iPhone",
     iphone: "iPhone",
-    pixelName: "Pixel 8",
-    galaxyName: "Galaxy S24",
-    iphoneName: "iPhone SE",
     controlling: "Controlling",
     available: "Ready to connect",
-    needsPairing: "Pairing required",
-    sessionActive: "Session active",
-    sessionAvailable: "Ready to connect",
-    wifiLatency: "Wi-Fi · 38 ms latency",
-    wifiReady: "Wi-Fi · Not connected",
-    pairingRequired: "Pairing required first",
+    unauthorized: "Unauthorized (allow debugging on the phone)",
+    offline: "Offline",
+    pairing_required: "Pairing required",
+    other: "Unknown status",
+    noDevices: "No devices found",
+    err_adb_not_found: "adb was not found. Install the Android platform tools and try again.",
+    err_adb_timed_out: "adb stopped responding. Reconnect the cable or restart adb, then try again.",
+    err_adb_failed: "Could not read the Android device list. Check that USB debugging is enabled.",
+    err_ios_not_found: "go-ios was not found, so iPhones cannot be listed yet.",
+    err_ios_failed: "Could not read the iPhone list.",
+    err_unknown: "Device discovery is temporarily unavailable.",
     showMirror: "Show mirror window",
     disconnect: "Disconnect",
     mirrorDescription: "Your phone screen appears in a separate mirror window\n(scrcpy live view · click directly to control)",
@@ -148,47 +154,15 @@ document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
   element.setAttribute("placeholder", text[element.dataset.i18nPlaceholder]);
 });
 
-const devices = [
-  {
-    id: "pixel-8",
-    nameKey: "pixelName",
-    platformKey: "android",
-    statusKey: "controlling",
-    stateKey: "sessionActive",
-    connectionKey: "wifiLatency",
-    dotClass: "status-active",
-    active: true,
-    soundOutput: "computer",
-    screenOff: "off",
-  },
-  {
-    id: "galaxy-s24",
-    nameKey: "galaxyName",
-    platformKey: "android",
-    statusKey: "available",
-    stateKey: "sessionAvailable",
-    connectionKey: "wifiReady",
-    dotClass: "status-available",
-    active: false,
-    soundOutput: "computer",
-    screenOff: "off",
-  },
-  {
-    id: "iphone-se",
-    nameKey: "iphoneName",
-    platformKey: "iphone",
-    statusKey: "needsPairing",
-    stateKey: "needsPairing",
-    connectionKey: "pairingRequired",
-    dotClass: "status-pairing",
-    active: false,
-    soundOutput: "computer",
-    screenOff: "off",
-  },
-];
-
-let selectedDeviceId = devices[0].id;
+let devices = [];
+let selectedDeviceId;
+let discoveryErrors = [];
 const deviceList = document.querySelector("#device-list");
+const deviceEmpty = document.querySelector("#device-empty");
+const deviceErrors = document.querySelector("#device-errors");
+const sessionHeader = document.querySelector("#session-header");
+const sessionContent = document.querySelector("#session-content");
+const sessionEmpty = document.querySelector("#session-empty");
 const soundInputs = [...document.querySelectorAll('input[name="sound-output"]')];
 const screenInputs = [...document.querySelectorAll('input[name="screen-off"]')];
 const sessionActionControls = [
@@ -205,6 +179,9 @@ function selectedDevice() {
 
 function renderDevices() {
   deviceList.replaceChildren();
+  deviceEmpty.hidden = devices.length !== 0;
+  deviceErrors.hidden = !discoveryErrors.length;
+  deviceErrors.textContent = discoveryErrors.join(" ");
   devices.forEach((device) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -213,7 +190,7 @@ function renderDevices() {
     button.setAttribute("aria-current", String(device.id === selectedDeviceId));
     button.setAttribute(
       "aria-label",
-      `${text[device.nameKey]}, ${text[device.platformKey]}, ${text[device.statusKey]}`,
+      `${device.name}, ${text[device.platform]}, ${text[device.status]}`,
     );
 
     const phoneIcon = document.querySelector(".mirror-phone").cloneNode(true);
@@ -224,14 +201,14 @@ function renderDevices() {
     copy.className = "device-copy";
     const name = document.createElement("span");
     name.className = "device-name";
-    name.textContent = text[device.nameKey];
+    name.textContent = device.name;
     const meta = document.createElement("span");
     meta.className = "device-meta";
-    meta.textContent = `${text[device.platformKey]} · ${text[device.statusKey]}`;
+    meta.textContent = `${text[device.platform]} · ${text[device.status]}`;
     copy.append(name, meta);
 
     const dot = document.createElement("span");
-    dot.className = `status-dot ${device.dotClass}`;
+    dot.className = `status-dot ${device.status === "available" ? "status-available" : "status-pairing"}`;
     dot.setAttribute("aria-hidden", "true");
     button.append(phoneIcon, copy, dot);
     deviceList.append(button);
@@ -240,14 +217,49 @@ function renderDevices() {
 
 function renderSession() {
   const device = selectedDevice();
-  document.querySelector("#session-device-name").textContent = text[device.nameKey];
-  document.querySelector("#session-state").textContent = text[device.stateKey];
-  document.querySelector("#session-connection").textContent = text[device.connectionKey];
+  const hasDevice = Boolean(device);
+  sessionHeader.hidden = !hasDevice;
+  sessionContent.hidden = !hasDevice;
+  sessionEmpty.hidden = hasDevice;
+  if (!device) return;
+  document.querySelector("#session-device-name").textContent = device.name;
+  document.querySelector("#session-state").textContent = text[device.status];
+  document.querySelector("#session-connection").textContent = text[device.platform];
   sessionActionControls.forEach((control) => {
-    control.disabled = !device.active;
+    control.disabled = true;
   });
-  soundInputs.find((input) => input.value === device.soundOutput).checked = true;
-  screenInputs.find((input) => input.value === device.screenOff).checked = true;
+  soundInputs.forEach((input) => { input.checked = input.value === "computer"; });
+  screenInputs.forEach((input) => { input.checked = input.value === "off"; });
+}
+
+// 后端只回稳定错误码，这里翻译；认不出的码退回通用文案，绝不把原始英文抛给用户。
+function describeError(code) {
+  return text[`err_${code}`] ?? text.err_unknown;
+}
+
+let refreshInFlight = false;
+
+async function refreshDevices() {
+  // adb 卡住时一次调用可能远超 5 秒，不加这道闸会越堆越多。
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    const result = await window.__TAURI__.core.invoke("list_devices");
+    devices = result.devices ?? [];
+    discoveryErrors = [result.android_error, result.ios_error]
+      .filter(Boolean)
+      .map(describeError);
+    if (!devices.some((device) => device.id === selectedDeviceId)) {
+      selectedDeviceId = devices[0]?.id;
+    }
+  } catch (error) {
+    console.error("list_devices failed", error);
+    discoveryErrors = [text.err_unknown];
+  } finally {
+    refreshInFlight = false;
+  }
+  renderDevices();
+  renderSession();
 }
 
 deviceList.addEventListener("click", (event) => {
@@ -258,19 +270,12 @@ deviceList.addEventListener("click", (event) => {
   renderSession();
 });
 
-soundInputs.forEach((input) => {
-  input.addEventListener("change", () => {
-    selectedDevice().soundOutput = input.value;
-  });
-});
-screenInputs.forEach((input) => {
-  input.addEventListener("change", () => {
-    selectedDevice().screenOff = input.value;
-  });
-});
+// 会话选项在 P2（一键会话）接后端；本切片控件是禁用的，这里只防御性留空。
 
 renderDevices();
 renderSession();
+refreshDevices();
+window.setInterval(refreshDevices, 5000);
 
 const backdrop = document.querySelector("#pairing-backdrop");
 const dialog = backdrop.querySelector(".dialog");

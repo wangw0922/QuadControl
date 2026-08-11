@@ -1176,11 +1176,13 @@ mod tests {
         ));
         let a = Device {
             serial: "1.2.3.4:5555".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };
         let b = Device {
             serial: "adb-X".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };
@@ -1371,11 +1373,13 @@ adb-R5CT30ABCDE-xyz._adb-tls-connect._tcp. 192.168.1.20:5555";
     fn dedupe_merges_on_shared_identity_and_keeps_unknown_apart() {
         let ip = Device {
             serial: "192.168.1.20:5555".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };
         let guid = Device {
             serial: "adb-R5CT30ABCDE-xyz".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };

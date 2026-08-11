@@ -46,6 +46,8 @@
       <aside class="sidebar" aria-labelledby="device-list-title">
         <h2 id="device-list-title" class="section-label" data-i18n="myDevices"></h2>
         <nav id="device-list" class="device-list" data-i18n-aria-label="myDevices"></nav>
+        <p id="device-empty" class="device-empty" data-i18n="noDevices" hidden></p>
+        <p id="device-errors" class="device-errors" hidden></p>
         <button id="add-device" class="btn btn-secondary btn-block" type="button">
           <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-plus"></use></svg>
           <span data-i18n="addDevice"></span>
@@ -53,7 +55,7 @@
       </aside>
 
       <section class="session" aria-labelledby="session-device-name">
-        <header class="session-header">
+        <header id="session-header" class="session-header">
           <div class="session-identity">
             <h1 id="session-device-name"></h1>
             <span id="session-state" class="tag tag-accent-2"></span>
@@ -68,7 +70,8 @@
           </div>
         </header>
 
-        <div class="session-content">
+        <p id="session-empty" class="session-empty" data-i18n="noDevices" hidden></p>
+        <div id="session-content" class="session-content">
           <section class="mirror-card card elev-sm" data-i18n-aria-label="mirrorDescription">
             <div class="phone-placeholder">
               <svg class="icon mirror-phone" aria-hidden="true"><use href="#icon-smartphone"></use></svg>

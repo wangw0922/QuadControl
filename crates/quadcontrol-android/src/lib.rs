@@ -3,7 +3,8 @@
 //! Device-list parsing intentionally comes from `adb-probe`. If another shared
 //! consumer appears, that parser should move to its own shared crate.
 
-use adb_probe::{parse_devices, CommandRunner, Device, DeviceState, SystemRunner};
+pub use adb_probe::DeviceState;
+use adb_probe::{parse_devices, CommandRunner, Device, SystemRunner};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Read};
@@ -654,6 +655,7 @@ mod tests {
     fn selection_branches() {
         let d = |serial: &str, state| Device {
             serial: serial.into(),
+            model: None,
             state,
             transport: adb_probe::Transport::Unknown,
         };
