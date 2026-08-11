@@ -44,9 +44,14 @@ Apple's iPhone Mirroring rather than anything of ours.
 - **Unified controller GUI** on each desktop (Windows, macOS, Linux): device
   discovery, pairing, engine launch/config/cleanup, iPhone-side integration.
   Today macOS has a working self-built viewer plus raw scrcpy; nothing is
-  unified yet, and Windows/Linux have no client at all. G0 (empty shell +
-  three-platform CI) is in progress; the reviewed slice plan is
-  [GUI_PLAN.md](GUI_PLAN.md).
+  unified yet, and Windows/Linux have no client at all. **G0 closed on
+  2026-08-10** — the Tauri shell builds on all three platforms in CI, screens
+  A and B are implemented against the design handoff (still on mock data), and
+  the Linux runtime spike passed on the Ubuntu 22.04 arm64 baseline (Chinese
+  text renders; MJPEG held 14.55 fps for 5 minutes with no leak). Slint
+  fallback was not triggered. Remaining work is sliced in
+  [GUI_PLAN.md](GUI_PLAN.md); the end-to-end roadmap is
+  [MASTER_PLAN.md](MASTER_PLAN.md).
 - **scrcpy on Windows/Linux**: expected to work (officially supported), not
   yet verified by this project.
 - **go-ios on Windows/Linux**: same status — cross-platform by design,

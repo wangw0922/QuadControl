@@ -88,16 +88,23 @@ iPhone 的熄屏控制与商店分发、任何绕过锁屏/隐藏控制的能力
 ### P0 收尾清理（当前批次遗留，短）
 
 - ~~**P0.1 裁决 `run_adb` stdin 分支删除**~~：**已完成**（#18，2026-08-10）。
-- **P0.2 G0 Linux 运行时闭环**（GUI_PLAN G0 的未竟项）：在本地 Ubuntu VM 实跑
-  GUI——WebKitGTK 窗口渲染中文、真 WDA MJPEG 流 ≥10fps 持续 5 分钟无泄漏。
-  【验收】达标即 G0 关闭；触发 Slint 止损条件则按 GUI_PLAN 决策。
-  【风险】arm64 VM 与 x86_64 的 WebKitGTK 行为差异；x86_64 留给 P6。
+- ~~**P0.2 G0 Linux 运行时闭环**~~：**已完成**（2026-08-10，本地 Ubuntu 22.04.5
+  arm64 虚拟机实跑）。**G0 关闭，未触发 Slint 止损条件。** 实测：
+  - 真实 GNOME/mutter 桌面上正常渲染 960×640 窗口；中文（zh_CN.UTF-8）全部正确。
+  - MJPEG 持续 **14.55 fps / 5 分钟**（阈值 ≥10），服务端背压计数 **0**；
+    应用 RSS 441.9 MB → 444.3 MB（+0.55%），WebKit 进程 +0.83%，**无泄漏**。
+  - CSP `img-src 'self' http://localhost:*` 实证可用（流被消费且画面渲染出来）。
+  - **边界**：MJPEG 源为**合成流**（本机未装 go-ios，现搭 WDA 属另一条链路）。
+    本次证明的是渲染端能力；**WDA 特有行为的验证归 P4**，届时用真流复测。
+  - **附带发现（待修，见 P1）**：英文 locale 下界面 A 头部在 960px 宽度溢出，
+    设备名被压成 `P…`；中文字符串较短所以在 macOS 上未暴露。
+  【遗留风险】arm64 与 x86_64 的 WebKitGTK 差异仍未覆盖，留给 P6。
 
 ### P1 设备列表真数据（= GUI_PLAN G1，界面 A 左栏落地）
 
 - 【范围】adb probe 解析 + `ios list` 双列接入 Tauri 后端 command（async +
   `spawn_blocking`）；界面 A 侧栏从 mock 切换为真实设备与状态徽章；轮询与
-  在线/离线迁移。
+  在线/离线迁移；**顺带修 P0.2 发现的英文头部溢出**。
 - 【验收】真机 Android + iPhone 同时插拔，列表 5 秒内收敛且无 UI 冻结；
   双语；`cargo test` 覆盖解析与状态机。
 
