@@ -10,7 +10,8 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,10 @@ pub mod wireless;
 
 pub const MIN_SCRCPY: (u64, u64) = (4, 1);
 pub const STDERR_LIMIT: usize = 64 * 1024;
+/// 监督会话的统一关闭预算；它覆盖终止梯子的最多 5 秒，并留出收尾余量。
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(7);
+/// 进程退出后再给 stderr 抽取线程的收尾时间，远小于关闭预算，不影响上面的期限。
+const STDERR_SETTLE_BUDGET: Duration = Duration::from_millis(200);
 
 #[derive(Debug)]
 pub enum Error {
@@ -367,6 +372,10 @@ pub struct Session {
     child: Child,
     stderr: Arc<Mutex<RingBuffer>>,
     stderr_thread: Option<JoinHandle<()>>,
+    /// 抽取线程读到 EOF 时置位。监督线程据此做**有界**等待，既能拿到完整的
+    /// stderr 尾部，又不必 join——scrcpy 会拉起 adb，孙进程继承同一管道，
+    /// 杀掉 scrcpy 后管道仍不关闭，join 会永久阻塞。
+    stderr_eof: Arc<AtomicBool>,
 }
 impl Session {
     pub fn start(options: &LaunchOptions) -> Result<Self, Error> {
@@ -384,16 +393,29 @@ impl Session {
         let mut child = command.spawn()?;
         let stderr = Arc::new(Mutex::new(RingBuffer::new(STDERR_LIMIT)));
         let shared = Arc::clone(&stderr);
+        let stderr_eof = Arc::new(AtomicBool::new(false));
+        let eof_flag = Arc::clone(&stderr_eof);
         let reader = child.stderr.take().expect("stderr is piped");
-        let thread = thread::spawn(move || drain_stderr(reader, shared));
+        let thread = thread::spawn(move || {
+            drain_stderr(reader, shared);
+            eof_flag.store(true, Ordering::Release);
+        });
         Ok(Self {
             child,
             stderr,
             stderr_thread: Some(thread),
+            stderr_eof,
         })
     }
     pub fn stop(&mut self) -> Result<(), Error> {
         terminate(&mut self.child)
+    }
+    /// 非消费地检查进程状态，不会 join stderr 抽取线程，也不产生其它收尾副作用。
+    pub fn try_wait(&mut self) -> Result<Option<i32>, Error> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(1)))
     }
     pub fn wait(self) -> Result<i32, Error> {
         Ok(self.wait_with_stderr()?.0)
@@ -430,6 +452,147 @@ impl Session {
     pub fn stderr_tail(&self) -> String {
         self.stderr.lock().expect("stderr mutex poisoned").text()
     }
+
+    /// 在 `budget` 内等待 stderr 抽取到 EOF 再取尾部；超时就返回当前内容。
+    ///
+    /// 进程刚退出时抽取线程可能还没读完最后一段，而会话失败时**恰恰是最后那段**
+    /// 才是诊断信息。这里用有界等待换取完整性，绝不无界阻塞（理由见
+    /// [`Session::stderr_eof`] 上的注释）。
+    pub fn stderr_tail_settled(&self, budget: Duration) -> String {
+        let deadline = Instant::now() + budget;
+        while !self.stderr_eof.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.stderr_tail()
+    }
+}
+
+/// 监督线程对 scrcpy 会话生命周期的可观察快照。
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionStatus {
+    Running,
+    Stopping,
+    Exited { code: i32, stderr_tail: String },
+    Failed { message: String },
+}
+
+enum StopCommand {
+    Stop,
+}
+
+/// 不暴露 `Session` 的监督句柄；所有进程操作都由内部监督线程执行。
+pub struct SessionHandle {
+    id: u64,
+    status: Arc<Mutex<SessionStatus>>,
+    stop_tx: mpsc::Sender<StopCommand>,
+    done_rx: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+impl SessionHandle {
+    /// 返回创建监督会话时指定的稳定标识。
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// 返回监督线程当前状态的快照；状态读取不会暴露 Session 的可变访问。
+    pub fn status(&self) -> SessionStatus {
+        self.status.lock().expect("status mutex poisoned").clone()
+    }
+
+    /// 请求停止会话。重复请求及监督线程已结束时都视为成功。
+    pub fn request_stop(&self) -> Result<(), Error> {
+        let _ = self.stop_tx.send(StopCommand::Stop);
+        Ok(())
+    }
+}
+
+/// 启动一个只由监督线程持有并操作的会话。
+pub fn spawn_supervised(options: &LaunchOptions, id: u64) -> Result<SessionHandle, Error> {
+    let session = Session::start(options)?;
+    let status = Arc::new(Mutex::new(SessionStatus::Running));
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let thread_status = Arc::clone(&status);
+    thread::spawn(move || {
+        supervise(session, stop_rx, done_tx, thread_status);
+    });
+    Ok(SessionHandle {
+        id,
+        status,
+        stop_tx,
+        done_rx: Arc::new(Mutex::new(done_rx)),
+    })
+}
+
+fn supervise(
+    mut session: Session,
+    stop_rx: mpsc::Receiver<StopCommand>,
+    done_tx: mpsc::Sender<()>,
+    status: Arc<Mutex<SessionStatus>>,
+) {
+    let result = loop {
+        if stop_rx.try_recv().is_ok() {
+            *status.lock().expect("status mutex poisoned") = SessionStatus::Stopping;
+            break session.stop().and_then(|()| {
+                session
+                    .try_wait()?
+                    .ok_or_else(|| Error::WrongState("stopped session was not reaped".into()))
+            });
+        }
+        match session.try_wait() {
+            Ok(Some(code)) => break Ok(code),
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => break Err(error),
+        }
+    };
+
+    match result {
+        Ok(code) => {
+            let tail = session.stderr_tail_settled(STDERR_SETTLE_BUDGET);
+            *status.lock().expect("status mutex poisoned") = SessionStatus::Exited {
+                code,
+                stderr_tail: tail,
+            };
+        }
+        Err(error) => {
+            *status.lock().expect("status mutex poisoned") = SessionStatus::Failed {
+                message: error.to_string(),
+            };
+        }
+    }
+    let _ = done_tx.send(());
+}
+
+/// 批量关闭的结果；超时项由调用方负责上报或后续处置。
+#[derive(Debug, PartialEq)]
+pub struct ShutdownReport {
+    pub timed_out: Vec<u64>,
+}
+
+/// 请求所有会话停止，并以一个共享总预算等待监督线程完成。
+///
+/// 超时只记录会话 ID，不根据保存的 PID 盲目强杀：PID 复用会误伤其它进程。
+/// 设备侧的强制回收仍由持有 `Child` 的监督线程执行终止梯子；这里的安全目标是
+/// 不留下仍在控制手机的 scrcpy 孤儿，而不是消灭 zombie 表项。
+pub fn shutdown_all(handles: &[SessionHandle], deadline: Duration) -> ShutdownReport {
+    for handle in handles {
+        let _ = handle.request_stop();
+    }
+    let deadline_at = Instant::now() + deadline;
+    let mut timed_out = Vec::new();
+    for handle in handles {
+        let remaining = deadline_at.saturating_duration_since(Instant::now());
+        let done = handle
+            .done_rx
+            .lock()
+            .expect("done mutex poisoned")
+            .recv_timeout(remaining)
+            .is_ok();
+        if !done {
+            timed_out.push(handle.id);
+        }
+    }
+    ShutdownReport { timed_out }
 }
 fn drain_stderr(mut reader: impl Read, buffer: Arc<Mutex<RingBuffer>>) {
     let mut chunk = [0u8; 4096];
