@@ -157,8 +157,8 @@
               <svg class="icon" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
               <span><strong data-i18n="androidName"></strong><small data-i18n="androidPairing"></small></span>
             </label>
-            <label class="type-option">
-              <input type="radio" name="device-type" value="iphone" />
+            <label class="type-option type-option-disabled">
+              <input type="radio" name="device-type" value="iphone" disabled />
               <svg class="icon" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
               <span><strong data-i18n="iphone"></strong><small data-i18n="iphonePairing"></small></span>
             </label>
@@ -172,8 +172,7 @@
           <h2 class="dialog-title" data-i18n="scanTitle"></h2>
           <div id="scan-view">
             <div class="scan-content">
-              <div class="qr-placeholder" role="img" data-i18n-aria-label="qrPlaceholder">
-                <svg class="icon qr-icon" aria-hidden="true"><use href="#icon-qr-code"></use></svg>
+              <div id="qr-code" class="qr-placeholder" role="img" data-i18n-aria-label="qrPlaceholder">
                 <span id="qr-countdown"></span>
               </div>
               <ol class="scan-instructions">
@@ -194,6 +193,7 @@
 
           <form id="manual-form" hidden>
             <p class="dialog-intro" data-i18n="manualDescription"></p>
+            <p id="manual-error" class="device-errors" hidden></p>
             <div class="manual-fields">
               <label class="field">
                 <span data-i18n="hostLabel"></span>

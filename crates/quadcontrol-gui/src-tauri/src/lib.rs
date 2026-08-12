@@ -1,11 +1,14 @@
 use adb_probe::{AdbCommand, CommandRunner, ExecutionError, ProbeError, SystemRunner};
 use quadcontrol_android::{SessionHandle, SessionStatus, SHUTDOWN_DEADLINE};
+use quadcontrol_android::wireless::{self, PairCancel, ROUND_TIMEOUT};
 use tauri::Manager;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 #[derive(Debug, Serialize)]
 struct DeviceDto {
@@ -33,6 +36,97 @@ struct SessionStore {
     /// Windows 构建失败，所以显式放行。
     #[cfg_attr(windows, allow(dead_code))]
     next_id: AtomicU64,
+}
+
+enum PairingState {
+    Idle,
+    Waiting { generation: u64, started: Instant },
+    Succeeded { generation: u64, device_name: String },
+    Failed { generation: u64, code: &'static str },
+    Cancelling { generation: u64 },
+}
+
+struct PairingStore {
+    state: Mutex<PairingState>,
+    cancel: Mutex<Option<PairCancel>>,
+    next_generation: AtomicU64,
+}
+
+#[derive(Debug, Serialize)]
+struct PairingStartDto {
+    generation: u64,
+    side: usize,
+    modules: Vec<bool>,
+    total_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PairingStatusDto {
+    generation: u64,
+    state: String,
+    remaining_secs: Option<u64>,
+    device_name: Option<String>,
+    error_code: Option<String>,
+}
+
+fn pairing_generation(state: &PairingState) -> u64 {
+    match state {
+        PairingState::Idle => 0,
+        PairingState::Waiting { generation, .. }
+        | PairingState::Succeeded { generation, .. }
+        | PairingState::Failed { generation, .. }
+        | PairingState::Cancelling { generation } => *generation,
+    }
+}
+
+fn pairing_is_active(state: &PairingState) -> bool {
+    matches!(state, PairingState::Waiting { .. } | PairingState::Cancelling { .. })
+}
+
+fn pairing_status_from(state: &PairingState) -> PairingStatusDto {
+    match state {
+        PairingState::Idle => PairingStatusDto { generation: 0, state: "idle".into(), remaining_secs: None, device_name: None, error_code: None },
+        PairingState::Waiting { generation, started } => PairingStatusDto {
+            generation: *generation,
+            state: "waiting".into(),
+            remaining_secs: Some(ROUND_TIMEOUT.as_secs().saturating_sub(started.elapsed().as_secs())),
+            device_name: None,
+            error_code: None,
+        },
+        PairingState::Succeeded { generation, device_name } => PairingStatusDto { generation: *generation, state: "succeeded".into(), remaining_secs: None, device_name: Some(device_name.clone()), error_code: None },
+        PairingState::Failed { generation, code } => PairingStatusDto { generation: *generation, state: "failed".into(), remaining_secs: None, device_name: None, error_code: Some((*code).into()) },
+        PairingState::Cancelling { generation } => PairingStatusDto { generation: *generation, state: "cancelling".into(), remaining_secs: None, device_name: None, error_code: None },
+    }
+}
+
+fn set_pairing_result(store: &PairingStore, generation: u64, result: Result<String, &'static str>) {
+    let Ok(mut state) = store.state.lock() else { return };
+    if pairing_generation(&state) != generation { return; }
+    if matches!(*state, PairingState::Cancelling { .. }) {
+        *state = PairingState::Idle;
+        if let Ok(mut cancel) = store.cancel.lock() { *cancel = None; }
+        return;
+    }
+    *state = match result {
+        Ok(name) => PairingState::Succeeded { generation, device_name: name },
+        Err(code) => PairingState::Failed { generation, code },
+    };
+    if let Ok(mut cancel) = store.cancel.lock() { *cancel = None; }
+}
+
+fn pairing_error_code(error: &wireless::WirelessError) -> &'static str {
+    match error {
+        wireless::WirelessError::RoundTimedOut | wireless::WirelessError::TimedOut => "pair_timed_out",
+        wireless::WirelessError::Cancelled => "pair_cancelled",
+        _ => "pair_failed",
+    }
+}
+
+fn paired_device_name(serial: &str) -> String {
+    match quadcontrol_android::devices(&quadcontrol_android::resolve_adb(None)) {
+        Ok(devices) => devices.into_iter().find(|device| device.serial == serial).and_then(|device| device.model).unwrap_or_else(|| "Android".into()),
+        Err(_) => "Android".into(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -254,7 +348,10 @@ fn list_devices_blocking() -> DeviceListDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_device_list, parse_ios_devices, short_ios_name};
+    use super::{extract_device_list, pairing_status_from, parse_ios_devices, set_pairing_result, short_ios_name, PairingState, PairingStore};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn parses_go_ios_json_device_list() {
@@ -299,6 +396,30 @@ mod tests {
         assert_eq!(short_ios_name("REDACTEDSERIAL"), "iPhone ····RIAL");
         assert_eq!(short_ios_name("ab"), "iPhone ····ab");
     }
+
+    #[test]
+    fn manual_pair_inputs_require_ip_literal_port_and_six_digits() {
+        assert!(super::validate_manual_inputs("192.0.2.1", 37145, "123456").is_ok());
+        assert!(super::validate_manual_inputs("example.invalid", 37145, "123456").is_err());
+        assert!(super::validate_manual_inputs("192.0.2.1", 0, "123456").is_err());
+        assert!(super::validate_manual_inputs("192.0.2.1", 37145, "12345x").is_err());
+        assert!(super::validate_manual_inputs("192.0.2.1", 37145, "12345").is_err());
+    }
+
+    #[test]
+    fn late_worker_result_cannot_overwrite_new_generation() {
+        let store = PairingStore { state: Mutex::new(PairingState::Waiting { generation: 2, started: Instant::now() }), cancel: Mutex::new(None), next_generation: AtomicU64::new(2) };
+        set_pairing_result(&store, 1, Ok("old".into()));
+        assert_eq!(pairing_status_from(&store.state.lock().unwrap()).generation, 2);
+        assert_eq!(pairing_status_from(&store.state.lock().unwrap()).state, "waiting");
+    }
+
+    #[test]
+    fn pairing_status_countdown_uses_backend_start_time() {
+        let status = pairing_status_from(&PairingState::Waiting { generation: 7, started: Instant::now() - Duration::from_secs(2) });
+        assert!(status.remaining_secs.unwrap() <= 298);
+        assert!(status.remaining_secs.unwrap() > 0);
+    }
 }
 
 #[tauri::command]
@@ -306,6 +427,74 @@ async fn list_devices() -> Result<DeviceListDto, String> {
     tauri::async_runtime::spawn_blocking(list_devices_blocking)
         .await
         .map_err(|error| format!("device discovery worker failed: {error}"))
+}
+
+#[tauri::command]
+async fn start_pairing(app: tauri::AppHandle, store: tauri::State<'_, PairingStore>) -> Result<PairingStartDto, String> {
+    let store = store.inner();
+    let secret = wireless::generate_pairing_secret();
+    let matrix = wireless::qr_matrix(&secret.payload).map_err(|_| "pair_failed".to_owned())?;
+    let cancel = PairCancel::new();
+    let generation = store.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    {
+        let mut state = store.state.lock().map_err(|_| "pair_failed".to_owned())?;
+        if pairing_is_active(&state) { return Err("pairing_already_running".into()); }
+        *state = PairingState::Waiting { generation, started: Instant::now() };
+        *store.cancel.lock().map_err(|_| "pair_failed".to_owned())? = Some(cancel.clone());
+    }
+    // Tauri's blocking pool owns the ADB work; the managed app state remains
+    // alive for the lifetime of this worker.
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let adb = quadcontrol_android::resolve_adb(None);
+            let outcome = wireless::pair_qr_command_with_cancel(&adb, secret, |_| {}, &cancel);
+            match outcome { Ok((serial, _, _)) => Ok(paired_device_name(&serial)), Err(error) => Err(pairing_error_code(&error)) }
+        }).await;
+        let result = match result { Ok(result) => result, Err(_) => Err("pair_failed") };
+        set_pairing_result(&app.state::<PairingStore>(), generation, result);
+    });
+    Ok(PairingStartDto { generation, side: matrix.side, modules: matrix.modules, total_secs: ROUND_TIMEOUT.as_secs() })
+}
+
+#[tauri::command]
+async fn pairing_status(store: tauri::State<'_, PairingStore>) -> Result<PairingStatusDto, String> {
+    let store = store.inner();
+    let state = store.state.lock().map_err(|_| "pair_failed".to_owned())?;
+    Ok(pairing_status_from(&state))
+}
+
+#[tauri::command]
+async fn cancel_pairing(store: tauri::State<'_, PairingStore>) -> Result<(), String> {
+    let store = store.inner();
+    let mut state = store.state.lock().map_err(|_| "pair_failed".to_owned())?;
+    if let PairingState::Waiting { generation, .. } = *state {
+        if let Some(cancel) = store.cancel.lock().map_err(|_| "pair_failed".to_owned())?.as_ref() { cancel.cancel(); }
+        *state = PairingState::Cancelling { generation };
+    }
+    Ok(())
+}
+
+fn valid_pair_host(host: &str) -> bool { host.parse::<IpAddr>().is_ok() }
+
+fn validate_manual_inputs(host: &str, port: u16, code: &str) -> Result<(), &'static str> {
+    if !valid_pair_host(host) { return Err("pair_failed"); }
+    if port == 0 || !code.as_bytes().iter().all(u8::is_ascii_digit) || code.len() != 6 {
+        return Err("pair_failed");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn pair_manual(host: String, port: u16, mut code: String) -> Result<(), String> {
+    if validate_manual_inputs(&host, port, &code).is_err() { wireless::wipe_secret_string(&mut code); return Err("pair_failed".into()); }
+    tauri::async_runtime::spawn_blocking(move || {
+        let adb = quadcontrol_android::resolve_adb(None);
+        let endpoint = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+        let result = wireless::pair(&adb, &endpoint, &code);
+        wireless::wipe_secret_string(&mut code);
+        let guid = result.map_err(|_| "pair_failed")?;
+        wireless::wait_for_guid(&adb, &guid, ROUND_TIMEOUT).map(|_| ()).map_err(|_| "manual_pair_needs_connect_port")
+    }).await.map_err(|_| "pair_failed".to_owned())?.map_err(str::to_owned)
 }
 
 /// Windows 上**有意不提供**会话控制，而不是尚未实现。
@@ -429,9 +618,18 @@ pub fn run() {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         })
+        .manage(PairingStore {
+            state: Mutex::new(PairingState::Idle),
+            cancel: Mutex::new(None),
+            next_generation: AtomicU64::new(0),
+        })
         .invoke_handler(tauri::generate_handler![
             ping,
             list_devices,
+            start_pairing,
+            pairing_status,
+            cancel_pairing,
+            pair_manual,
             start_session,
             stop_session,
             sessions
@@ -474,6 +672,16 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let worker = app_handle.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
+            let shutdown_started = Instant::now();
+            let pairing = worker.state::<PairingStore>();
+            if let Ok(cancel) = pairing.cancel.lock() {
+                if let Some(cancel) = cancel.as_ref() { cancel.cancel(); }
+            }
+            while shutdown_started.elapsed() < SHUTDOWN_DEADLINE {
+                let active = pairing.state.lock().map(|state| pairing_is_active(&state)).unwrap_or(false);
+                if !active { break; }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
             let store = worker.state::<SessionStore>();
             let handles = match store.sessions.lock() {
                 Ok(mut sessions) => sessions.drain().map(|(_, handle)| handle).collect::<Vec<_>>(),
@@ -482,7 +690,7 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
                     return None;
                 }
             };
-            Some(quadcontrol_android::shutdown_all(&handles, SHUTDOWN_DEADLINE))
+            Some(quadcontrol_android::shutdown_all(&handles, SHUTDOWN_DEADLINE.saturating_sub(shutdown_started.elapsed())))
         })
         .await;
         match result {

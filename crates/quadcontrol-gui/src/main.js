@@ -54,30 +54,35 @@ const messages = {
     scanPair: "扫码配对",
     startControl: "开始控制",
     chooseDeviceTitle: "选择要配对的设备",
-    chooseDeviceDescription: "选择手机类型，然后在下一步用手机扫描配对码。",
-    androidPairing: "使用 QuadControl 扫码配对",
-    iphonePairing: "使用 QuadControl 扫码配对",
+    chooseDeviceDescription: "选择要配对的 Android 手机。iPhone 暂不支持（后续版本）。",
+    androidPairing: "使用 Android 系统的无线调试二维码配对",
+    iphonePairing: "暂不支持（后续版本）",
     next: "下一步",
-    scanTitle: "用手机扫一下，就连好了",
-    qrPlaceholder: "配对二维码占位",
-    qrCountdown: "配对二维码 · {seconds} 秒自动刷新",
-    scanStepOne: "在手机上打开 QuadControl",
-    scanStepTwo: "点击「扫描配对码」",
-    scanStepThree: "把相机对准左边的二维码，地址和密钥会自动填好",
-    networkNote: "二维码只在你的家庭/办公网络内有效，不会经过互联网。",
+    scanTitle: "用手机系统设置扫描配对二维码",
+    qrPlaceholder: "Android 无线调试配对二维码",
+    qrCountdown: "等待手机扫码 · 剩余 {seconds}",
+    scanStepOne: "在手机上打开「设置 → 开发者选项 → 无线调试」",
+    scanStepTwo: "点击「使用二维码配对设备」",
+    scanStepThree: "对准这张二维码即可；首次启用无线调试时，手机可能要求确认信任当前 Wi‑Fi 网络",
+    networkNote: "这是 Android 无线调试的原生配对二维码，手机系统设置会读取它。",
     manualLink: "无法扫码？手动输入配对码",
     previous: "上一步",
     waitingScan: "等待手机扫码…",
-    manualDescription: "输入电脑显示的地址、端口和配对密钥。",
-    hostLabel: "电脑地址",
+    manualDescription: "输入手机上显示的配对地址、配对端口和 6 位配对码。配对成功后如需连接，请另行输入无线调试主页上的连接端口。",
+    hostLabel: "手机上显示的配对地址",
     hostPlaceholder: "例如 192.168.1.20",
-    portLabel: "端口",
-    portPlaceholder: "例如 27183",
-    pairingCodeLabel: "配对密钥",
-    pairingCodePlaceholder: "输入配对密钥",
+    portLabel: "手机上显示的配对端口",
+    portPlaceholder: "1–65535",
+    pairingCodeLabel: "手机上显示的 6 位配对码",
+    pairingCodePlaceholder: "输入 6 位数字",
     continue: "继续",
     pairingCompleteTitle: "配对完成，可以开始控制",
-    pairingCompleteDescription: "这台手机已经添加到你的设备列表。",
+    pairingCompleteDescription: "已配对设备：{device}",
+    pairing_already_running: "已有配对流程正在进行。",
+    manual_pair_needs_connect_port: "配对成功，但设备尚未上线。请输入无线调试主页上的连接端口。",
+    pair_failed: "配对失败，请检查手机状态后重试。",
+    pair_timed_out: "配对超时，请重新打开无线调试并重试。",
+    pair_cancelled: "配对已取消。",
     done: "完成",
   },
   en: {
@@ -135,30 +140,35 @@ const messages = {
     scanPair: "Scan to pair",
     startControl: "Start control",
     chooseDeviceTitle: "Choose a device to pair",
-    chooseDeviceDescription: "Choose the phone type, then scan the pairing code with your phone.",
-    androidPairing: "Scan with QuadControl to pair",
-    iphonePairing: "Scan with QuadControl to pair",
+    chooseDeviceDescription: "Choose an Android phone to pair. iPhone support is coming in a later version.",
+    androidPairing: "Pair with Android Wireless debugging",
+    iphonePairing: "Not supported yet (coming later)",
     next: "Next",
-    scanTitle: "Scan once and you're connected",
-    qrPlaceholder: "Pairing QR code placeholder",
-    qrCountdown: "Pairing QR · refreshes in {seconds} seconds",
-    scanStepOne: "Open QuadControl on your phone",
-    scanStepTwo: "Tap “Scan pairing code”",
-    scanStepThree: "Point the camera at the QR code; the address and key fill in automatically",
-    networkNote: "This QR code works only on your home or office network and never passes through the internet.",
+    scanTitle: "Scan with Android Wireless debugging",
+    qrPlaceholder: "Android Wireless debugging pairing QR code",
+    qrCountdown: "Waiting for phone scan · {seconds} remaining",
+    scanStepOne: "On the phone, open Settings → Developer options → Wireless debugging",
+    scanStepTwo: "Tap “Pair device with QR code”",
+    scanStepThree: "Point the phone at this QR code; the first setup may ask you to confirm trust in the current Wi‑Fi network",
+    networkNote: "This is Android's native Wireless debugging pairing QR code; the phone's Settings app reads it.",
     manualLink: "Can't scan? Enter the pairing code manually",
     previous: "Back",
     waitingScan: "Waiting for phone…",
-    manualDescription: "Enter the address, port, and pairing key shown on your computer.",
-    hostLabel: "Computer address",
+    manualDescription: "Enter the pairing address, pairing port, and six-digit code shown on the phone. If the device does not come online, enter the separate connection port shown on the Wireless debugging home screen.",
+    hostLabel: "Pairing address shown on the phone",
     hostPlaceholder: "For example, 192.168.1.20",
-    portLabel: "Port",
-    portPlaceholder: "For example, 27183",
-    pairingCodeLabel: "Pairing key",
-    pairingCodePlaceholder: "Enter pairing key",
+    portLabel: "Pairing port shown on the phone",
+    portPlaceholder: "1–65535",
+    pairingCodeLabel: "Six-digit pairing code shown on the phone",
+    pairingCodePlaceholder: "Enter six digits",
     continue: "Continue",
     pairingCompleteTitle: "Pairing complete — ready to control",
-    pairingCompleteDescription: "This phone is now in your device list.",
+    pairingCompleteDescription: "Paired device: {device}",
+    pairing_already_running: "A pairing flow is already in progress.",
+    manual_pair_needs_connect_port: "Pairing succeeded, but the device is not online. Enter the separate connection port from the Wireless debugging home screen.",
+    pair_failed: "Pairing failed. Check the phone state and try again.",
+    pair_timed_out: "Pairing timed out. Reopen Wireless debugging and try again.",
+    pair_cancelled: "Pairing cancelled.",
     done: "Done",
   },
 };
@@ -292,6 +302,10 @@ function describeError(code) {
   return text[`err_${code}`] ?? text.err_unknown;
 }
 
+function describePairingError(code) {
+  return text[code] ?? describeError(code);
+}
+
 let refreshInFlight = false;
 
 async function refreshDevices() {
@@ -386,8 +400,9 @@ const stepViews = [1, 2, 3].map((step) => document.querySelector(`#pair-step-${s
 const scanView = document.querySelector("#scan-view");
 const manualForm = document.querySelector("#manual-form");
 let pairingStep = 1;
-let countdown = 30;
 let countdownTimer;
+let pairingGeneration;
+let pairingDeviceName = "Android";
 
 function renderPairingSteps() {
   const labels = [text.chooseType, text.scanPair, text.startControl];
@@ -422,26 +437,36 @@ function renderPairingSteps() {
 }
 
 function updateCountdown() {
-  document.querySelector("#qr-countdown").textContent = text.qrCountdown.replace(
-    "{seconds}",
-    String(countdown),
-  );
+  return window.__TAURI__.core.invoke("pairing_status").then((status) => {
+    if (status.generation !== pairingGeneration) return;
+    document.querySelector("#qr-countdown").textContent = text.qrCountdown.replace("{seconds}", formatRemaining(status.remaining_secs ?? 0));
+    if (status.state === "succeeded") {
+      pairingDeviceName = status.device_name ?? "Android";
+      document.querySelector("[data-i18n='pairingCompleteDescription']").textContent = text.pairingCompleteDescription.replace("{device}", pairingDeviceName);
+      setPairingStep(3);
+      refreshDevices();
+    } else if (status.state === "failed") {
+      document.querySelector("#qr-countdown").textContent = describePairingError(status.error_code ?? "pair_failed");
+    }
+  }).catch(() => {});
 }
 
-function startCountdown() {
+function formatRemaining(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function startPairingStatusPoll() {
   clearInterval(countdownTimer);
-  countdown = 30;
   updateCountdown();
-  countdownTimer = window.setInterval(() => {
-    countdown = countdown > 1 ? countdown - 1 : 30;
-    updateCountdown();
-  }, 1000);
+  countdownTimer = window.setInterval(updateCountdown, 1000);
 }
 
 function showScanView() {
   manualForm.hidden = true;
+  document.querySelector("#manual-error").hidden = true;
   scanView.hidden = false;
-  startCountdown();
+  startPairingStatusPoll();
   document.querySelector("#show-manual").focus();
 }
 
@@ -466,15 +491,42 @@ function openPairing() {
   setPairingStep(1);
 }
 
-function closePairing() {
+async function cancelPairing() {
+  try { await window.__TAURI__.core.invoke("cancel_pairing"); } catch (error) { console.error("cancel_pairing failed", error); }
+}
+
+async function closePairing() {
   clearInterval(countdownTimer);
+  await cancelPairing();
   backdrop.hidden = true;
   document.body.classList.remove("dialog-open");
   document.querySelector("#add-device").focus();
 }
 
 document.querySelector("#add-device").addEventListener("click", openPairing);
-document.querySelector("#pair-next").addEventListener("click", () => setPairingStep(2));
+document.querySelector("#pair-next").addEventListener("click", async () => {
+  try {
+    const start = await window.__TAURI__.core.invoke("start_pairing");
+    pairingGeneration = start.generation;
+    const qr = document.querySelector("#qr-code");
+    qr.replaceChildren();
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${start.side} ${start.side}`);
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    let d = "";
+    for (let y = 0; y < start.side; y += 1) for (let x = 0; x < start.side; x += 1) if (start.modules[y * start.side + x]) d += `M${x} ${y}h1v1H${x}z`;
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "#111111");
+    svg.append(path);
+    const countdown = document.createElement("span");
+    countdown.id = "qr-countdown";
+    qr.append(svg, countdown);
+    setPairingStep(2);
+  } catch (error) {
+    document.querySelector("#qr-countdown").textContent = describePairingError(String(error));
+  }
+});
 document.querySelector("#show-manual").addEventListener("click", () => {
   clearInterval(countdownTimer);
   scanView.hidden = true;
@@ -484,10 +536,29 @@ document.querySelector("#show-manual").addEventListener("click", () => {
 document.querySelector("#manual-back").addEventListener("click", showScanView);
 manualForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (manualForm.reportValidity()) setPairingStep(3);
+  if (!manualForm.reportValidity()) return;
+  const port = Number(manualForm.elements.port.value);
+  const code = manualForm.elements.code.value;
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^\d{6}$/.test(code)) return;
+  window.__TAURI__.core.invoke("pair_manual", { host: manualForm.elements.host.value, port, code })
+    .then(() => {
+      pairingDeviceName = "Android";
+      document.querySelector("[data-i18n='pairingCompleteDescription']").textContent = text.pairingCompleteDescription.replace("{device}", pairingDeviceName);
+      setPairingStep(3);
+      refreshDevices();
+    })
+    .catch((error) => {
+      const message = describePairingError(String(error));
+      const errorView = document.querySelector("#manual-error");
+      errorView.textContent = message;
+      errorView.hidden = false;
+    });
+  manualForm.elements.host.value = "";
+  manualForm.elements.port.value = "";
+  manualForm.elements.code.value = "";
 });
 document.querySelectorAll(".pair-back").forEach((button) => {
-  button.addEventListener("click", () => setPairingStep(pairingStep - 1));
+  button.addEventListener("click", async () => { await cancelPairing(); setPairingStep(pairingStep - 1); });
 });
 document.querySelector("#pair-done").addEventListener("click", closePairing);
 

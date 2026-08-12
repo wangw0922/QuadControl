@@ -696,6 +696,19 @@ button:disabled {
   gap: 20px;
 }
 
+.qr-placeholder svg {
+  width: 216px;
+  height: 216px;
+  display: block;
+  background: #ffffff;
+  shape-rendering: crispEdges;
+}
+
+.type-option-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .dialog-title {
   margin: 0;
   font-family: var(--font-heading);
