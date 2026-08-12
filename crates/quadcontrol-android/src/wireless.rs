@@ -19,7 +19,11 @@ const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// 不派生 `Debug`：派生版会把 password 原样打印，任何一处 `{:?}`（含 panic 消息、
+/// 日志、`dbg!`）都会泄漏配对密钥。手写脱敏实现。
+/// 也不派生 `Clone`：副本会绕开「round-close 时显式 wipe 一次」的纪律，
+/// 留下未擦除的密钥拷贝。
+#[derive(Eq, PartialEq)]
 pub struct PairingSecret {
     pub service_name: String,
     pub password: String,
@@ -39,6 +43,17 @@ impl PairingSecret {
 impl Drop for PairingSecret {
     fn drop(&mut self) {
         self.wipe();
+    }
+}
+
+impl fmt::Debug for PairingSecret {
+    /// 只暴露服务名（它本来就在 mDNS 上广播），密码与整条 payload 一律脱敏。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingSecret")
+            .field("service_name", &self.service_name)
+            .field("password", &"<redacted>")
+            .field("payload", &"<redacted>")
+            .finish()
     }
 }
 
@@ -1050,6 +1065,26 @@ pub fn adb_mdns_services(adb: &Path) -> Result<Vec<MdnsService>, WirelessError> 
 mod tests {
     use super::*;
     use adb_probe::Transport;
+
+    /// 钉住脱敏：任何人把 `#[derive(Debug)]` 加回 `PairingSecret`，这条就红。
+    /// 配对密钥出现在日志或 panic 消息里是安全事故，不是体验问题。
+    #[test]
+    fn debug_never_reveals_the_password() {
+        let secret = generate_pairing_secret();
+        let rendered = format!("{secret:?}");
+        assert!(
+            !rendered.contains(&secret.password),
+            "Debug 输出泄漏了配对密钥"
+        );
+        assert!(
+            !rendered.contains(&secret.payload),
+            "Debug 输出泄漏了 payload"
+        );
+        assert!(rendered.contains("<redacted>"));
+        // 服务名本来就在 mDNS 上广播，保留它便于排查。
+        assert!(rendered.contains(&secret.service_name));
+    }
+
     #[test]
     fn payload_shape_and_charset() {
         let s = generate_pairing_secret();
