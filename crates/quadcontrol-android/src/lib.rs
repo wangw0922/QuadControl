@@ -61,6 +61,13 @@ pub fn resolve_adb(explicit: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("adb"))
 }
 
+pub fn resolve_scrcpy(explicit: Option<&Path>) -> PathBuf {
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("SCRCPY").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("scrcpy"))
+}
+
 pub fn devices(adb: &Path) -> Result<Vec<Device>, Error> {
     let output = SystemRunner::new(adb.as_os_str())
         .run(adb_probe::AdbCommand::DevicesLong)
@@ -191,6 +198,7 @@ pub struct LaunchOptions {
     pub serial: String,
     pub bit_rate: String,
     pub screen_off: bool,
+    pub audio_on_computer: bool,
     pub passthrough: Vec<String>,
     pub scrcpy_env: Vec<(String, String)>,
 }
@@ -281,9 +289,11 @@ enum OptionKind {
 }
 fn long_kind(s: &str) -> Option<OptionKind> {
     Some(match s {
-        "serial" | "select-usb" | "select-tcpip" | "window-title" | "video-bit-rate" => {
-            OptionKind::Conflict
-        }
+        // 音频归 `LaunchOptions::audio_on_computer` 一等字段管（界面上的「声音输出」）。
+        // 若同时允许从 passthrough 传，同一配置就有两个来源，最终行为取决于参数
+        // 顺序——所以在这里就拒绝，保证单一来源。
+        "serial" | "select-usb" | "select-tcpip" | "window-title" | "video-bit-rate"
+        | "no-audio" | "audio-source" | "no-audio-playback" => OptionKind::Conflict,
         "screen-off-timeout" | "tcpip" => OptionKind::Deny,
         "record" => OptionKind::Deny,
         "no-cleanup" | "stay-awake" | "show-touches" | "power-off-on-close"
@@ -339,6 +349,9 @@ pub fn build_args(options: &LaunchOptions) -> Result<Vec<String>, Error> {
     );
     if options.screen_off {
         args.push("--turn-screen-off".into());
+    }
+    if !options.audio_on_computer {
+        args.push("--no-audio".into());
     }
     Ok(args)
 }
@@ -731,6 +744,49 @@ pub const HELP: &str = "Usage: quadcontrol-scrcpy [--adb PATH] [--serial SERIAL]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn launch_options(audio_on_computer: bool) -> LaunchOptions {
+        LaunchOptions {
+            adb: PathBuf::from("adb"),
+            scrcpy: PathBuf::from("scrcpy"),
+            serial: "REDACTEDSERIAL".into(),
+            bit_rate: "8M".into(),
+            screen_off: false,
+            audio_on_computer,
+            passthrough: Vec::new(),
+            scrcpy_env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_args_controls_audio_forwarding() {
+        assert!(build_args(&launch_options(false))
+            .unwrap()
+            .contains(&"--no-audio".to_owned()));
+        assert!(!build_args(&launch_options(true))
+            .unwrap()
+            .contains(&"--no-audio".to_owned()));
+    }
+
+    #[test]
+    fn resolve_scrcpy_prefers_explicit_then_environment_then_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("SCRCPY");
+        std::env::set_var("SCRCPY", "/env/scrcpy");
+        assert_eq!(
+            resolve_scrcpy(Some(Path::new("/explicit/scrcpy"))),
+            PathBuf::from("/explicit/scrcpy")
+        );
+        assert_eq!(resolve_scrcpy(None), PathBuf::from("/env/scrcpy"));
+        std::env::remove_var("SCRCPY");
+        assert_eq!(resolve_scrcpy(None), PathBuf::from("scrcpy"));
+        if let Some(value) = previous {
+            std::env::set_var("SCRCPY", value);
+        }
+    }
     #[test]
     fn stable_versions_and_prereleases() {
         assert!(validate_version_text("scrcpy 4.1\n").is_ok());

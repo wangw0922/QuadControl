@@ -22,6 +22,18 @@ const messages = {
     err_unknown: "设备发现暂时不可用。",
     showMirror: "显示镜像窗口",
     disconnect: "断开连接",
+    sessionStatus: "会话状态",
+    sessionRunning: "会话进行中",
+    sessionStarting: "正在启动会话…",
+    sessionStopping: "正在断开连接…",
+    sessionExited: "会话已退出（代码 {code}）",
+    sessionFailed: "会话失败",
+    futureVersion: "此功能将在未来版本提供",
+    err_session_already_running: "这台设备已经有一个进行中的会话。",
+    err_scrcpy_not_found: "没有找到 scrcpy，请先安装 scrcpy 4.1 或更高版本。",
+    err_scrcpy_version: "scrcpy 版本不受支持，请安装稳定版 4.1 或更高版本。",
+    err_session_start_failed: "会话启动失败，请检查设备连接后重试。",
+    err_session_failed: "会话失败，请重新连接设备后重试。",
     mirrorDescription: "手机画面在独立的镜像窗口中显示\n（scrcpy 实时画面 · 可直接点按操作）",
     sessionControls: "会话控制",
     soundOutput: "声音输出",
@@ -91,6 +103,18 @@ const messages = {
     err_unknown: "Device discovery is temporarily unavailable.",
     showMirror: "Show mirror window",
     disconnect: "Disconnect",
+    sessionStatus: "Session status",
+    sessionRunning: "Session running",
+    sessionStarting: "Starting session…",
+    sessionStopping: "Disconnecting…",
+    sessionExited: "Session exited (code {code})",
+    sessionFailed: "Session failed",
+    futureVersion: "Coming in a future version",
+    err_session_already_running: "This device already has a session in progress.",
+    err_scrcpy_not_found: "scrcpy was not found. Install scrcpy 4.1 or newer and try again.",
+    err_scrcpy_version: "This scrcpy version is unsupported. Install stable scrcpy 4.1 or newer.",
+    err_session_start_failed: "The session could not start. Check the device connection and try again.",
+    err_session_failed: "The session failed. Reconnect the device and try again.",
     mirrorDescription: "Your phone screen appears in a separate mirror window\n(scrcpy live view · click directly to control)",
     sessionControls: "Session controls",
     soundOutput: "Sound output",
@@ -153,10 +177,16 @@ document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
 document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
   element.setAttribute("placeholder", text[element.dataset.i18nPlaceholder]);
 });
+document.querySelectorAll("[data-i18n-title]").forEach((element) => {
+  element.title = text[element.dataset.i18nTitle];
+});
 
 let devices = [];
 let selectedDeviceId;
 let discoveryErrors = [];
+const sessionsByDevice = new Map();
+const localSessionStates = new Map();
+const preferencesByDevice = new Map();
 const deviceList = document.querySelector("#device-list");
 const deviceEmpty = document.querySelector("#device-empty");
 const deviceErrors = document.querySelector("#device-errors");
@@ -167,11 +197,19 @@ const soundInputs = [...document.querySelectorAll('input[name="sound-output"]')]
 const screenInputs = [...document.querySelectorAll('input[name="screen-off"]')];
 const sessionActionControls = [
   document.querySelector("#show-mirror"),
-  document.querySelector("#disconnect"),
-  document.querySelector(".control-row .btn-secondary"),
+  document.querySelector("#capture-screen"),
   ...soundInputs,
   ...screenInputs,
 ];
+
+const sessionAction = document.querySelector("#session-action");
+
+function preferencesFor(deviceId) {
+  if (!preferencesByDevice.has(deviceId)) {
+    preferencesByDevice.set(deviceId, { audioOnComputer: true, screenOff: false });
+  }
+  return preferencesByDevice.get(deviceId);
+}
 
 function selectedDevice() {
   return devices.find((device) => device.id === selectedDeviceId);
@@ -223,13 +261,30 @@ function renderSession() {
   sessionEmpty.hidden = hasDevice;
   if (!device) return;
   document.querySelector("#session-device-name").textContent = device.name;
-  document.querySelector("#session-state").textContent = text[device.status];
+  const session = sessionsByDevice.get(device.id);
+  const state = localSessionStates.get(device.id) ?? session?.state ?? "idle";
+  const preferences = preferencesFor(device.id);
+  const stateText = state === "running" ? text.sessionRunning
+    : state === "starting" ? text.sessionStarting
+      : state === "stopping" ? text.sessionStopping
+        : state === "exited" ? text.sessionExited.replace("{code}", String(session?.exit_code ?? "?"))
+          : state === "failed" ? text.sessionFailed : text[device.status];
+  document.querySelector("#session-state").textContent = stateText;
   document.querySelector("#session-connection").textContent = text[device.platform];
-  sessionActionControls.forEach((control) => {
-    control.disabled = true;
-  });
-  soundInputs.forEach((input) => { input.checked = input.value === "computer"; });
-  screenInputs.forEach((input) => { input.checked = input.value === "off"; });
+  sessionAction.textContent = state === "running" || state === "stopping" ? text.disconnect : text.startControl;
+  sessionAction.classList.toggle("btn-primary", state !== "running" && state !== "stopping");
+  sessionAction.classList.toggle("btn-disconnect", state === "running" || state === "stopping");
+  sessionAction.disabled = state === "starting" || state === "stopping";
+  const controlsLocked = state === "running" || state === "starting" || state === "stopping";
+  sessionActionControls.forEach((control) => { control.disabled = controlsLocked || control.id === "show-mirror" || control.id === "capture-screen"; });
+  soundInputs.forEach((input) => { input.checked = input.value === (preferences.audioOnComputer ? "computer" : "phone"); });
+  screenInputs.forEach((input) => { input.checked = input.value === (preferences.screenOff ? "on" : "off"); });
+  const detail = document.querySelector("#session-status-detail");
+  detail.textContent = state === "failed" ? describeError(session?.stderr_tail ?? "session_failed")
+    : state === "exited" ? stateText : stateText;
+  const stderr = document.querySelector("#session-stderr");
+  stderr.hidden = state !== "failed" || !session?.stderr_tail;
+  stderr.textContent = stderr.hidden ? "" : describeError(session.stderr_tail);
 }
 
 // 后端只回稳定错误码，这里翻译；认不出的码退回通用文案，绝不把原始英文抛给用户。
@@ -244,8 +299,13 @@ async function refreshDevices() {
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    const result = await window.__TAURI__.core.invoke("list_devices");
+    const [result, sessionResult] = await Promise.all([
+      window.__TAURI__.core.invoke("list_devices"),
+      window.__TAURI__.core.invoke("sessions"),
+    ]);
     devices = result.devices ?? [];
+    sessionsByDevice.clear();
+    (sessionResult ?? []).forEach((session) => sessionsByDevice.set(session.device_id, session));
     discoveryErrors = [result.android_error, result.ios_error]
       .filter(Boolean)
       .map(describeError);
@@ -270,7 +330,50 @@ deviceList.addEventListener("click", (event) => {
   renderSession();
 });
 
-// 会话选项在 P2（一键会话）接后端；本切片控件是禁用的，这里只防御性留空。
+sessionAction.addEventListener("click", async () => {
+  const device = selectedDevice();
+  if (!device) return;
+  const state = localSessionStates.get(device.id) ?? sessionsByDevice.get(device.id)?.state;
+  if (state === "running") {
+    localSessionStates.set(device.id, "stopping");
+    renderSession();
+    try {
+      await window.__TAURI__.core.invoke("stop_session", { deviceId: device.id });
+    } catch (error) {
+      console.error("stop_session failed", error);
+      localSessionStates.delete(device.id);
+      renderSession();
+    }
+    return;
+  }
+  const preferences = preferencesFor(device.id);
+  localSessionStates.set(device.id, "starting");
+  renderSession();
+  try {
+    await window.__TAURI__.core.invoke("start_session", {
+      deviceId: device.id,
+      screenOff: preferences.screenOff,
+      audioOnComputer: preferences.audioOnComputer,
+    });
+    localSessionStates.delete(device.id);
+  } catch (error) {
+    console.error("start_session failed", error);
+    localSessionStates.delete(device.id);
+    sessionsByDevice.set(device.id, { device_id: device.id, state: "failed", stderr_tail: String(error) });
+  }
+  renderSession();
+});
+
+soundInputs.forEach((input) => input.addEventListener("change", () => {
+  const device = selectedDevice();
+  if (!device) return;
+  preferencesFor(device.id).audioOnComputer = input.value === "computer";
+}));
+screenInputs.forEach((input) => input.addEventListener("change", () => {
+  const device = selectedDevice();
+  if (!device) return;
+  preferencesFor(device.id).screenOff = input.value === "on";
+}));
 
 renderDevices();
 renderSession();

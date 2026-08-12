@@ -1,6 +1,11 @@
 use adb_probe::{AdbCommand, CommandRunner, ExecutionError, ProbeError, SystemRunner};
+use quadcontrol_android::{SessionHandle, SessionStatus, SHUTDOWN_DEADLINE};
+use tauri::Manager;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 #[derive(Debug, Serialize)]
 struct DeviceDto {
@@ -19,6 +24,67 @@ struct DeviceListDto {
     devices: Vec<DeviceDto>,
     android_error: Option<String>,
     ios_error: Option<String>,
+}
+
+struct SessionStore {
+    sessions: Mutex<HashMap<String, SessionHandle>>,
+    /// Windows 上 `start_session` 直接拒绝（见其文档注释），这个计数器与
+    /// `session_error_code` 都用不上——但 CI 是 `-D warnings`，死代码会让
+    /// Windows 构建失败，所以显式放行。
+    #[cfg_attr(windows, allow(dead_code))]
+    next_id: AtomicU64,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionDto {
+    device_id: String,
+    state: String,
+    exit_code: Option<i32>,
+    stderr_tail: Option<String>,
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn session_error_code(error: &quadcontrol_android::Error) -> &'static str {
+    match error {
+        quadcontrol_android::Error::ScrcpyNotFound(_) => "scrcpy_not_found",
+        quadcontrol_android::Error::ScrcpyVersion(_) => "scrcpy_version",
+        _ => "session_start_failed",
+    }
+}
+
+fn truncate_tail(text: String, limit: usize) -> String {
+    let mut chars = text.chars().rev().take(limit).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+fn session_dto(device_id: String, status: SessionStatus) -> SessionDto {
+    match status {
+        SessionStatus::Running => SessionDto {
+            device_id,
+            state: "running".into(),
+            exit_code: None,
+            stderr_tail: None,
+        },
+        SessionStatus::Stopping => SessionDto {
+            device_id,
+            state: "stopping".into(),
+            exit_code: None,
+            stderr_tail: None,
+        },
+        SessionStatus::Exited { code, .. } => SessionDto {
+            device_id,
+            state: "exited".into(),
+            exit_code: Some(code),
+            stderr_tail: None,
+        },
+        SessionStatus::Failed { .. } => SessionDto {
+            device_id,
+            state: "failed".into(),
+            exit_code: None,
+            stderr_tail: Some("session_failed".into()),
+        },
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -242,6 +308,109 @@ async fn list_devices() -> Result<DeviceListDto, String> {
         .map_err(|error| format!("device discovery worker failed: {error}"))
 }
 
+/// Windows 上**有意不提供**会话控制，而不是尚未实现。
+///
+/// 「所有会话可见、可断开」是我们对用户的安全边界承诺。Windows 上要真正收回
+/// scrcpy 的整棵进程树需要 Job Object（kill-on-close），那是 P6 的内容且本项目
+/// 目前没有 Windows 验证环境。没有它，「断开连接」可能留下仍在控制手机的孤儿
+/// 进程——与其假装支持，不如明确拒绝。
+#[cfg(windows)]
+#[tauri::command]
+#[allow(unused_variables)]
+async fn start_session(
+    store: tauri::State<'_, SessionStore>,
+    device_id: String,
+    screen_off: bool,
+    audio_on_computer: bool,
+) -> Result<(), String> {
+    Err("windows_session_unsupported".into())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn start_session(
+    store: tauri::State<'_, SessionStore>,
+    device_id: String,
+    screen_off: bool,
+    audio_on_computer: bool,
+) -> Result<(), String> {
+    let store = store.inner();
+    let mut sessions = store
+        .sessions
+        .lock()
+        .map_err(|_| "session_start_failed".to_owned())?;
+    if let Some(existing) = sessions.get(&device_id) {
+        if matches!(existing.status(), SessionStatus::Running | SessionStatus::Stopping) {
+            return Err("session_already_running".into());
+        }
+    }
+    sessions.remove(&device_id);
+    let options = quadcontrol_android::LaunchOptions {
+        adb: quadcontrol_android::resolve_adb(None),
+        scrcpy: quadcontrol_android::resolve_scrcpy(None),
+        serial: device_id.clone(),
+        bit_rate: "8M".into(),
+        screen_off,
+        audio_on_computer,
+        passthrough: Vec::new(),
+        scrcpy_env: Vec::new(),
+    };
+    let id = store.next_id.fetch_add(1, Ordering::Relaxed);
+    match quadcontrol_android::spawn_supervised(&options, id) {
+        Ok(handle) => {
+            sessions.insert(device_id, handle);
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("session start failed: {error}");
+            Err(session_error_code(&error).into())
+        }
+    }
+}
+
+#[tauri::command]
+async fn stop_session(
+    store: tauri::State<'_, SessionStore>,
+    device_id: String,
+) -> Result<(), String> {
+    let store = store.inner();
+    let sessions = store
+        .sessions
+        .lock()
+        .map_err(|_| "session_start_failed".to_owned())?;
+    if let Some(handle) = sessions.get(&device_id) {
+        handle
+            .request_stop()
+            .map_err(|error| {
+                eprintln!("session stop failed: {error}");
+                "session_start_failed".to_owned()
+            })?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sessions(store: tauri::State<'_, SessionStore>) -> Result<Vec<SessionDto>, String> {
+    let store = store.inner();
+    let sessions = store
+        .sessions
+        .lock()
+        .map_err(|_| "session_failed".to_owned())?;
+    Ok(sessions
+        .iter()
+        .map(|(device_id, handle)| match handle.status() {
+            SessionStatus::Exited { code, stderr_tail } => SessionDto {
+                device_id: device_id.clone(),
+                state: "exited".into(),
+                exit_code: Some(code),
+                stderr_tail: Some(truncate_tail(stderr_tail, 2000)),
+            },
+            SessionStatus::Failed { .. } => session_dto(device_id.clone(), SessionStatus::Failed { message: "session_failed".into() }),
+            status => session_dto(device_id.clone(), status),
+        })
+        .collect())
+}
+
 #[tauri::command]
 async fn ping() -> Result<String, String> {
     // Tauri synchronous commands run on the main thread. Keep this async plus
@@ -255,8 +424,76 @@ async fn ping() -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, list_devices])
-        .run(tauri::generate_context!())
-        .expect("error while running QuadControl GUI");
+    let builder = tauri::Builder::default()
+        .manage(SessionStore {
+            sessions: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        })
+        .invoke_handler(tauri::generate_handler![
+            ping,
+            list_devices,
+            start_session,
+            stop_session,
+            sessions
+        ]);
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("error while building QuadControl GUI: {error}");
+            return;
+        }
+    };
+    app.run(|app_handle, event| match event {
+        // 退出前必须先收回会话，但**不能在事件循环里同步等**——最长 7 秒的清理会
+        // 让窗口停止响应、被系统判定卡死。因此拦下退出，把清理丢到后台，完成后
+        // 再真正退出。macOS 的 Cmd+Q 只发 ExitRequested、不发 CloseRequested，
+        // 所以两个入口都要拦。
+        tauri::RunEvent::ExitRequested { api, .. } if !SHUTDOWN_DONE.load(Ordering::SeqCst) => {
+            api.prevent_exit();
+            begin_shutdown(app_handle.clone());
+        }
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if !SHUTDOWN_DONE.load(Ordering::SeqCst) => {
+            api.prevent_close();
+            begin_shutdown(app_handle.clone());
+        }
+        _ => {}
+    });
+}
+
+/// 清理只跑一次；完成后置位，让随后的退出事件直接放行。
+static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
+
+fn begin_shutdown(app_handle: tauri::AppHandle) {
+    if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+        return; // 用户连点关闭：清理已在进行，忽略
+    }
+    tauri::async_runtime::spawn(async move {
+        let worker = app_handle.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let store = worker.state::<SessionStore>();
+            let handles = match store.sessions.lock() {
+                Ok(mut sessions) => sessions.drain().map(|(_, handle)| handle).collect::<Vec<_>>(),
+                Err(_) => {
+                    eprintln!("session store is poisoned during shutdown");
+                    return None;
+                }
+            };
+            Some(quadcontrol_android::shutdown_all(&handles, SHUTDOWN_DEADLINE))
+        })
+        .await;
+        match result {
+            Ok(Some(report)) if !report.timed_out.is_empty() => eprintln!(
+                "session shutdown timed out for {} session(s)",
+                report.timed_out.len()
+            ),
+            Err(error) => eprintln!("shutdown worker failed: {error}"),
+            _ => {}
+        }
+        SHUTDOWN_DONE.store(true, Ordering::SeqCst);
+        app_handle.exit(0);
+    });
 }

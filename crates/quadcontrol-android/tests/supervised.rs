@@ -21,6 +21,7 @@ fn options(mode: &str, pid_file: Option<&PathBuf>) -> LaunchOptions {
         serial: "REDACTEDSERIAL".into(),
         bit_rate: "8M".into(),
         screen_off: false,
+        audio_on_computer: true,
         passthrough: Vec::new(),
         scrcpy_env,
     }
