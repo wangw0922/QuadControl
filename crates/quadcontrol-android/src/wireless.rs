@@ -19,6 +19,11 @@ pub const PASSWORD_LENGTH: usize = 12;
 pub const ROUND_TIMEOUT: Duration = Duration::from_secs(300);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// 取消配对后等待 worker 回收的预算。**必须大于 `COMMAND_TIMEOUT`**：取消只能在
+/// 外围轮询点生效，worker 可能正卡在一次最长 10 秒的 adb 调用里；预算比它短，就等于
+/// 到点直接退出、把 adb 子进程留在身后。会话那条链路走自己的 `SHUTDOWN_DEADLINE`
+/// （由终止梯子决定），两者不能共用同一份预算。
+pub const PAIRING_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(COMMAND_TIMEOUT.as_secs() + 3);
 const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Cooperative cancellation for GUI-owned pairing work. The Arc is kept

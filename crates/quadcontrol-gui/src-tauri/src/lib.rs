@@ -52,7 +52,9 @@ struct PairingStore {
     next_generation: AtomicU64,
 }
 
-#[derive(Debug, Serialize)]
+/// 不派生 `Debug`：`modules` 是配对密码的等价编码，一次普通调试日志就能把整张
+/// 矩阵打出去——与 `PairingSecret` 去掉 derive(Debug) 是同一个理由。
+#[derive(Serialize)]
 struct PairingStartDto {
     generation: u64,
     side: usize,
@@ -484,17 +486,65 @@ fn validate_manual_inputs(host: &str, port: u16, code: &str) -> Result<(), &'sta
     Ok(())
 }
 
+/// 手动配对与二维码配对**共用同一个状态机与取消令牌**。
+///
+/// 早期实现让它另起一个不在 `PairingStore` 里的 worker，于是：两路 `adb pair`
+/// 可以并发、退出清理够不着它、它还能带着 300 秒的上线等待一直跑下去。配对是
+/// 有状态的设备写操作，必须只有一条在飞、且始终可取消、可回收。
 #[tauri::command]
-async fn pair_manual(host: String, port: u16, mut code: String) -> Result<(), String> {
-    if validate_manual_inputs(&host, port, &code).is_err() { wireless::wipe_secret_string(&mut code); return Err("pair_failed".into()); }
-    tauri::async_runtime::spawn_blocking(move || {
-        let adb = quadcontrol_android::resolve_adb(None);
-        let endpoint = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
-        let result = wireless::pair(&adb, &endpoint, &code);
+async fn pair_manual(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, PairingStore>,
+    host: String,
+    port: u16,
+    mut code: String,
+) -> Result<(), String> {
+    if validate_manual_inputs(&host, port, &code).is_err() {
         wireless::wipe_secret_string(&mut code);
-        let guid = result.map_err(|_| "pair_failed")?;
-        wireless::wait_for_guid(&adb, &guid, ROUND_TIMEOUT).map(|_| ()).map_err(|_| "manual_pair_needs_connect_port")
-    }).await.map_err(|_| "pair_failed".to_owned())?.map_err(str::to_owned)
+        return Err("pair_failed".into());
+    }
+    let store = store.inner();
+    let cancel = PairCancel::new();
+    let generation = store.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    {
+        let mut state = store.state.lock().map_err(|_| "pair_failed".to_owned())?;
+        if pairing_is_active(&state) {
+            wireless::wipe_secret_string(&mut code);
+            return Err("pairing_already_running".into());
+        }
+        *state = PairingState::Waiting {
+            generation,
+            started: Instant::now(),
+        };
+        *store.cancel.lock().map_err(|_| "pair_failed".to_owned())? = Some(cancel.clone());
+    }
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let adb = quadcontrol_android::resolve_adb(None);
+            let endpoint = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            let paired = wireless::pair(&adb, &endpoint, &code);
+            wireless::wipe_secret_string(&mut code);
+            let guid = paired.map_err(|_| "pair_failed")?;
+            // 配对端口 ≠ 连接端口：上线失败不代表配对失败，交给界面引导用户
+            // 另行输入连接端口，绝不拿配对端口去 connect。
+            match wireless::wait_for_guid_with_cancel(&adb, &guid, ROUND_TIMEOUT, &cancel) {
+                Ok(serial) => Ok(paired_device_name(&serial)),
+                Err(_) if cancel.is_cancelled() => Err("pair_cancelled"),
+                Err(_) => Err("manual_pair_needs_connect_port"),
+            }
+        })
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err("pair_failed"),
+        };
+        set_pairing_result(&app.state::<PairingStore>(), generation, result);
+    });
+    Ok(())
 }
 
 /// Windows 上**有意不提供**会话控制，而不是尚未实现。
@@ -672,25 +722,47 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let worker = app_handle.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let shutdown_started = Instant::now();
+            // 先发配对取消，再去停会话——会话那几秒里配对 worker 正好在回收，
+            // 两条链路的等待因此重叠，而不是串行相加。
+            let cancelled_at = Instant::now();
             let pairing = worker.state::<PairingStore>();
             if let Ok(cancel) = pairing.cancel.lock() {
-                if let Some(cancel) = cancel.as_ref() { cancel.cancel(); }
+                if let Some(cancel) = cancel.as_ref() {
+                    cancel.cancel();
+                }
             }
-            while shutdown_started.elapsed() < SHUTDOWN_DEADLINE {
-                let active = pairing.state.lock().map(|state| pairing_is_active(&state)).unwrap_or(false);
-                if !active { break; }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
+
             let store = worker.state::<SessionStore>();
             let handles = match store.sessions.lock() {
                 Ok(mut sessions) => sessions.drain().map(|(_, handle)| handle).collect::<Vec<_>>(),
                 Err(_) => {
                     eprintln!("session store is poisoned during shutdown");
-                    return None;
+                    Vec::new()
                 }
             };
-            Some(quadcontrol_android::shutdown_all(&handles, SHUTDOWN_DEADLINE.saturating_sub(shutdown_started.elapsed())))
+            let report = quadcontrol_android::shutdown_all(&handles, SHUTDOWN_DEADLINE);
+
+            // 配对用自己的预算（> 单次 adb 命令超时），不与会话预算共用。
+            while cancelled_at.elapsed() < wireless::PAIRING_SHUTDOWN_DEADLINE {
+                let active = pairing
+                    .state
+                    .lock()
+                    .map(|state| pairing_is_active(&state))
+                    .unwrap_or(false);
+                if !active {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            if pairing
+                .state
+                .lock()
+                .map(|state| pairing_is_active(&state))
+                .unwrap_or(false)
+            {
+                eprintln!("pairing worker did not finish before exit");
+            }
+            Some(report)
         })
         .await;
         match result {

@@ -443,6 +443,8 @@ function updateCountdown() {
     if (status.state === "succeeded") {
       pairingDeviceName = status.device_name ?? "Android";
       document.querySelector("[data-i18n='pairingCompleteDescription']").textContent = text.pairingCompleteDescription.replace("{device}", pairingDeviceName);
+      clearInterval(countdownTimer);
+      clearQrCode();
       setPairingStep(3);
       refreshDevices();
     } else if (status.state === "failed") {
@@ -495,9 +497,16 @@ async function cancelPairing() {
   try { await window.__TAURI__.core.invoke("cancel_pairing"); } catch (error) { console.error("cancel_pairing failed", error); }
 }
 
+/// 二维码矩阵是配对密码的等价编码，轮次一结束就要从 DOM 里清掉，
+/// 不能只把对话框隐藏了事——隐藏的节点仍然留在文档里。
+function clearQrCode() {
+  document.querySelector("#qr-code")?.replaceChildren();
+}
+
 async function closePairing() {
   clearInterval(countdownTimer);
   await cancelPairing();
+  clearQrCode();
   backdrop.hidden = true;
   document.body.classList.remove("dialog-open");
   document.querySelector("#add-device").focus();
@@ -527,8 +536,12 @@ document.querySelector("#pair-next").addEventListener("click", async () => {
     document.querySelector("#qr-countdown").textContent = describePairingError(String(error));
   }
 });
-document.querySelector("#show-manual").addEventListener("click", () => {
+document.querySelector("#show-manual").addEventListener("click", async () => {
   clearInterval(countdownTimer);
+  // 切到手动模式必须真正取消二维码轮次：否则两路 adb pair 会并发，
+  // 后端也会因为已有在飞配对而拒绝手动提交。
+  await cancelPairing();
+  clearQrCode();
   scanView.hidden = true;
   manualForm.hidden = false;
   manualForm.elements.host.focus();
@@ -544,6 +557,8 @@ manualForm.addEventListener("submit", (event) => {
     .then(() => {
       pairingDeviceName = "Android";
       document.querySelector("[data-i18n='pairingCompleteDescription']").textContent = text.pairingCompleteDescription.replace("{device}", pairingDeviceName);
+      clearInterval(countdownTimer);
+      clearQrCode();
       setPairingStep(3);
       refreshDevices();
     })
@@ -558,7 +573,11 @@ manualForm.addEventListener("submit", (event) => {
   manualForm.elements.code.value = "";
 });
 document.querySelectorAll(".pair-back").forEach((button) => {
-  button.addEventListener("click", async () => { await cancelPairing(); setPairingStep(pairingStep - 1); });
+  button.addEventListener("click", async () => {
+    await cancelPairing();
+    clearQrCode();
+    setPairingStep(pairingStep - 1);
+  });
 });
 document.querySelector("#pair-done").addEventListener("click", closePairing);
 
