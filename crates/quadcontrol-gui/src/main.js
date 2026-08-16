@@ -48,7 +48,9 @@ const messages = {
     captureDescription: "保存到这台电脑的\"图片\"文件夹",
     capture: "截屏",
     safetyTitle: "连接由你发起，随时可断开",
-    safetyDescription: "控制期间手机上会一直显示提示；本软件不会绕过锁屏或密码。",
+    safetyDescription:
+      "这台电脑已由你在手机上明确授权（开发者选项 + USB 调试）。会话随时可断开，" +
+      "结束后会恢复手机的亮度、旋转与超时设置；本软件不会绕过锁屏或密码。",
     pairingDialog: "添加设备配对向导",
     chooseType: "选择类型",
     scanPair: "扫码配对",
@@ -134,7 +136,10 @@ const messages = {
     captureDescription: "Save to the Pictures folder on this computer",
     capture: "Capture",
     safetyTitle: "You start every connection and can disconnect anytime",
-    safetyDescription: "A notice remains visible on the phone during control; this software never bypasses its lock screen or password.",
+    safetyDescription:
+      "You authorized this computer on the phone yourself (developer options plus USB debugging). " +
+      "You can disconnect at any time, and the phone's brightness, rotation, and timeout are restored " +
+      "when the session ends; this software never bypasses its lock screen or password.",
     pairingDialog: "Add device pairing guide",
     chooseType: "Choose type",
     scanPair: "Scan to pair",
