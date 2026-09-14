@@ -20,8 +20,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 quadcontrol-android = { path = "../../quadcontrol-android" }
+quadcontrol-ios = { path = "../../quadcontrol-ios" }
 quadcontrol-adb-probe = { path = "../../../agents/android-shell/adb-probe" }
 serde = { version = "1", features = ["derive"] }
+# 截图落盘要「图片」目录与本地时间戳的文件名；两者都没有稳定的标准库接口。
+dirs = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+# DTO 字段表的回归测试（不含 stderr / UDID）需要序列化一次。
+serde_json = "1"

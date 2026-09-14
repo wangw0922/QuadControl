@@ -19,6 +19,53 @@ const messages = {
     err_adb_failed: "读取安卓设备列表失败，请检查手机是否已开启 USB 调试。",
     err_ios_not_found: "没有找到 go-ios，iPhone 暂时无法列出。",
     err_ios_failed: "读取 iPhone 列表失败。",
+    err_ios_version: "go-ios 版本过低或无法识别，请安装 1.2.1 及以上的正式版。",
+    err_usbmuxd_unavailable: "连不上 usbmuxd，请确认 usbmuxd 服务正在运行、数据线已插好。",
+    err_tunnel_port_busy: "go-ios 的隧道端口已被占用，请先结束另一个 go-ios 隧道。",
+    err_tunnel_failed: "建立 iPhone 隧道失败，请拔插数据线后重试。",
+    err_wda_not_installed: "手机上没有安装 WebDriverAgent，请先用你的开发者证书安装它。",
+    err_wda_signature_expired: "WebDriverAgent 的签名已过期，请重新签名并安装后重试。",
+    err_wda_unreachable: "WebDriverAgent 起来了但连不上，请在手机上确认它已允许运行。",
+    err_wda_session_failed: "无法在 WebDriverAgent 上建立会话，请重新连接后重试。",
+    err_forward_failed: "端口转发失败，请拔插数据线后重试。",
+    err_proxy_failed: "画面转发中断，请重新连接。",
+    err_device_locked: "手机已锁定，请在手机上解锁后继续。",
+    err_text_unconfirmed: "无法确认已送达，请在手机上核对。",
+    err_screenshot_failed: "截屏失败，请重试。",
+    err_ios_session_already_running: "已有一个 iPhone 会话在进行中；同一时刻只能控制一台 iPhone。",
+    err_ios_session_not_running: "iPhone 会话没有在运行，请先开始控制。",
+    err_ios_process_error: "与 go-ios 通信失败，请查看日志后重试。",
+    err_windows_session_unsupported: "Windows 上暂不支持开始会话（后续版本提供）。",
+    err_macos_uses_iphone_mirroring: "在 Mac 上请使用系统自带的「iPhone 镜像」。",
+    err_iphone_mirroring_failed: "无法打开「iPhone 镜像」，请在启动台里手动打开。",
+    err_unsupported: "当前系统不支持这个操作。",
+    iosStageHint: "iPhone 实时画面\n（点击画面 = 点手机屏幕）",
+    iosConnected: "已连接 · {fps} 帧/秒",
+    iosDisconnected: "未连接",
+    iosLocked: "手机已锁定，请在手机上解锁后继续",
+    iosSendTextLabel: "发送文字到 iPhone",
+    iosSendTextPlaceholder: "在这里打字，直接输入到手机…",
+    iosSend: "发送",
+    iosTextSent: "已发送",
+    iosWake: "唤醒屏幕",
+    iosCapture: "截取屏幕",
+    iosHome: "回到主屏幕",
+    iosScreenshotSaved: "已保存到 {path}",
+    iosSoundTitle: "声音保留在手机上",
+    iosSoundDescription: "iPhone 的声音暂时无法转发到电脑，这是系统限制。",
+    iosLimitsTitle: "iPhone 控制的已知限制",
+    iosLimitsDescription:
+      "控制走 Apple 的 UI 自动化，不是输入注入，个别应用可能不响应；" +
+      "需要你自备开发者证书签名的 WebDriverAgent，签名过期后要重新安装；" +
+      "手机屏幕的显示状态由手机自己决定，本软件不做任何控制；" +
+      "手机锁定时画面为黑、文字不送达，请在手机上解锁。",
+    iosMirroringTitle: "在 Mac 上用系统「iPhone 镜像」",
+    iosMirroringDescription:
+      "macOS 自带的「iPhone 镜像」体验更完整，QuadControl 直接帮你打开它，" +
+      "之后的操作都在那个窗口里完成。QuadControl 不会驱动或自动化这个应用。",
+    iosMirroringOpen: "打开 iPhone 镜像",
+    iosMirroringUnavailable: "需要 macOS 15 及以上",
+    iosSessionElsewhere: "已有 iPhone 会话在运行",
     err_unknown: "设备发现暂时不可用。",
     showMirror: "显示镜像窗口",
     disconnect: "断开连接",
@@ -107,6 +154,53 @@ const messages = {
     err_adb_failed: "Could not read the Android device list. Check that USB debugging is enabled.",
     err_ios_not_found: "go-ios was not found, so iPhones cannot be listed yet.",
     err_ios_failed: "Could not read the iPhone list.",
+    err_ios_version: "This go-ios version is too old or unreadable. Install stable go-ios 1.2.1 or newer.",
+    err_usbmuxd_unavailable: "usbmuxd is not reachable. Check that the usbmuxd service runs and the cable is connected.",
+    err_tunnel_port_busy: "The go-ios tunnel port is already in use. Stop the other go-ios tunnel first.",
+    err_tunnel_failed: "The iPhone tunnel could not be started. Reconnect the cable and try again.",
+    err_wda_not_installed: "WebDriverAgent is not installed on the phone. Install it with your own developer certificate first.",
+    err_wda_signature_expired: "The WebDriverAgent signature has expired. Re-sign and reinstall it, then try again.",
+    err_wda_unreachable: "WebDriverAgent started but is unreachable. Allow it to run on the phone and try again.",
+    err_wda_session_failed: "A WebDriverAgent session could not be created. Reconnect and try again.",
+    err_forward_failed: "Port forwarding failed. Reconnect the cable and try again.",
+    err_proxy_failed: "The live view stopped. Reconnect to continue.",
+    err_device_locked: "The iPhone is locked. Unlock it on the phone to continue.",
+    err_text_unconfirmed: "Delivery could not be confirmed — check the text on the iPhone.",
+    err_screenshot_failed: "The screenshot could not be saved. Try again.",
+    err_ios_session_already_running: "An iPhone session is already running; only one iPhone can be controlled at a time.",
+    err_ios_session_not_running: "No iPhone session is running. Start control first.",
+    err_ios_process_error: "Communication with go-ios failed. Check the logs and try again.",
+    err_windows_session_unsupported: "Starting a session is not supported on Windows yet (coming later).",
+    err_macos_uses_iphone_mirroring: "On a Mac, use Apple's own iPhone Mirroring.",
+    err_iphone_mirroring_failed: "iPhone Mirroring could not be opened. Open it from Launchpad instead.",
+    err_unsupported: "This operating system does not support that action.",
+    iosStageHint: "iPhone live view\n(click the view = tap the phone)",
+    iosConnected: "Connected · {fps} fps",
+    iosDisconnected: "Not connected",
+    iosLocked: "The phone is locked — unlock it on the phone to continue",
+    iosSendTextLabel: "Send text to the iPhone",
+    iosSendTextPlaceholder: "Type here to type on the phone…",
+    iosSend: "Send",
+    iosTextSent: "Sent",
+    iosWake: "Wake the screen",
+    iosCapture: "Capture screen",
+    iosHome: "Go to the home screen",
+    iosScreenshotSaved: "Saved to {path}",
+    iosSoundTitle: "Sound stays on the phone",
+    iosSoundDescription: "iPhone audio cannot be forwarded to this computer; that is a system limitation.",
+    iosLimitsTitle: "Known limits of iPhone control",
+    iosLimitsDescription:
+      "Control goes through Apple's UI automation rather than input injection, so some apps may not respond; " +
+      "you need your own developer-signed WebDriverAgent and must reinstall it when the signature expires; " +
+      "the phone decides its own display state and this software never changes it; " +
+      "while the phone is locked the view is black and text is not delivered — unlock it on the phone.",
+    iosMirroringTitle: "Use Apple's iPhone Mirroring on this Mac",
+    iosMirroringDescription:
+      "macOS ships iPhone Mirroring, which is the more complete experience; QuadControl just opens it for you " +
+      "and everything else happens in that window. QuadControl never drives or automates that app.",
+    iosMirroringOpen: "Open iPhone Mirroring",
+    iosMirroringUnavailable: "Requires macOS 15 or newer",
+    iosSessionElsewhere: "An iPhone session is already running",
     err_unknown: "Device discovery is temporarily unavailable.",
     showMirror: "Show mirror window",
     disconnect: "Disconnect",
@@ -218,6 +312,63 @@ const sessionActionControls = [
 ];
 
 const sessionAction = document.querySelector("#session-action");
+const showMirrorButton = document.querySelector("#show-mirror");
+
+// 界面 C：iPhone 控制面板
+const androidPanel = document.querySelector("#android-panel");
+const iosPanel = document.querySelector("#ios-panel");
+const iosStageColumn = document.querySelector("#ios-stage-column");
+const iosStage = document.querySelector("#ios-stage");
+const iosStream = document.querySelector("#ios-stream");
+const iosStagePlaceholder = document.querySelector("#ios-stage-placeholder");
+const iosFpsTag = document.querySelector("#ios-fps");
+const iosLockedNote = document.querySelector("#ios-locked");
+const iosTextCard = document.querySelector("#ios-text-card");
+const iosTextInput = document.querySelector("#ios-text");
+const iosSendButton = document.querySelector("#ios-send");
+const iosTextResult = document.querySelector("#ios-text-result");
+const iosActionCard = document.querySelector("#ios-action-card");
+const iosActionResult = document.querySelector("#ios-action-result");
+const iosWakeButton = document.querySelector("#ios-wake");
+const iosCaptureButton = document.querySelector("#ios-capture");
+const iosHomeButton = document.querySelector("#ios-home");
+const iosMirroringCard = document.querySelector("#ios-mirroring-card");
+const openMirroringButton = document.querySelector("#open-mirroring");
+const mirroringNote = document.querySelector("#mirroring-note");
+
+/// 宿主平台决定 iPhone 面板长什么样：macOS 只有引导卡，Win/Linux 才有画面与控制。
+let hostPlatform = "linux";
+let mirroringAvailable = false;
+/// macOS 开发路径（debug 构建 + QUADCONTROL_IOS_DEV_WDA=1）：真机验收时用完整面板。
+let iosDevWda = false;
+
+/// macOS 的产品路径只有引导卡；开发路径放行时按 Win/Linux 版式渲染。
+function iosGuidanceOnly() {
+  return hostPlatform === "macos" && !iosDevWda;
+}
+/// 同一时刻只有一个 iOS 会话，所以状态是单个对象而不是 Map。
+let iosStatus = { state: "idle", fps: 0 };
+/// 会话属于哪台设备只在前端关联：状态 DTO 里**没有** UDID（红线），后端也不该有。
+/// 代价是 WebView 重载会丢掉这个关联（会话仍在后台跑，状态卡照样能断开）。
+let iosSessionDeviceId;
+let iosStreaming = false;
+let iosPollInFlight = false;
+
+function iosSessionIsLive(state) {
+  return state === "starting" || state === "running" || state === "stopping";
+}
+
+/// 后端说有会话在跑，但前端不知道它属于哪台设备（界面重载会丢掉这个关联，
+/// 因为状态 DTO 里没有 UDID）。此时仍要让「断开连接」可达，但**不认领画面**：
+/// 接了两台 iPhone 时把别人的屏幕显示在这台设备的面板上，比少显示一块画面糟糕。
+function iosSessionIsUnowned() {
+  return !iosOwnsSelectedDevice() && iosSessionIsLive(iosStatus.state);
+}
+
+function iosOwnsSelectedDevice() {
+  const device = selectedDevice();
+  return Boolean(device) && device.platform === "ios" && device.id === iosSessionDeviceId;
+}
 
 function preferencesFor(deviceId) {
   if (!preferencesByDevice.has(deviceId)) {
@@ -241,10 +392,8 @@ function renderDevices() {
     button.className = "device-item";
     button.dataset.deviceId = device.id;
     button.setAttribute("aria-current", String(device.id === selectedDeviceId));
-    button.setAttribute(
-      "aria-label",
-      `${device.name}, ${text[device.platform]}, ${text[device.status]}`,
-    );
+    const statusText = deviceStatusText(device);
+    button.setAttribute("aria-label", `${device.name}, ${text[device.platform]}, ${statusText}`);
 
     const phoneIcon = document.querySelector(".mirror-phone").cloneNode(true);
     phoneIcon.classList.remove("mirror-phone");
@@ -257,15 +406,33 @@ function renderDevices() {
     name.textContent = device.name;
     const meta = document.createElement("span");
     meta.className = "device-meta";
-    meta.textContent = `${text[device.platform]} · ${text[device.status]}`;
+    meta.textContent = `${text[device.platform]} · ${statusText}`;
     copy.append(name, meta);
 
     const dot = document.createElement("span");
-    dot.className = `status-dot ${device.status === "available" ? "status-available" : "status-pairing"}`;
+    const tone = deviceIsControlled(device)
+      ? "status-active"
+      : device.status === "available"
+        ? "status-available"
+        : "status-pairing";
+    dot.className = `status-dot ${tone}`;
     dot.setAttribute("aria-hidden", "true");
     button.append(phoneIcon, copy, dot);
     deviceList.append(button);
   });
+}
+
+// 正在被控制的设备在侧栏标「正在控制」，而不是设备发现给的原始状态。
+function deviceIsControlled(device) {
+  return (
+    device.platform === "ios" &&
+    device.id === iosSessionDeviceId &&
+    iosSessionIsLive(iosStatus.state)
+  );
+}
+
+function deviceStatusText(device) {
+  return deviceIsControlled(device) ? text.controlling : text[device.status];
 }
 
 function renderSession() {
@@ -274,8 +441,22 @@ function renderSession() {
   sessionHeader.hidden = !hasDevice;
   sessionContent.hidden = !hasDevice;
   sessionEmpty.hidden = hasDevice;
-  if (!device) return;
+  if (!device) {
+    // 设备被拔掉时也要断掉 MJPEG 下游，别让隐藏的 <img> 继续拉流。
+    syncIosStream();
+    return;
+  }
   document.querySelector("#session-device-name").textContent = device.name;
+  if (device.platform === "ios") {
+    renderIosPanel();
+    return;
+  }
+  androidPanel.hidden = false;
+  iosPanel.hidden = true;
+  showMirrorButton.hidden = false;
+  sessionAction.hidden = false;
+  // 切到 Android 设备也要断掉 MJPEG 下游：隐藏的 <img> 仍然在拉流。
+  syncIosStream();
   const session = sessionsByDevice.get(device.id);
   const state = localSessionStates.get(device.id) ?? session?.state ?? "idle";
   const preferences = preferencesFor(device.id);
@@ -361,6 +542,10 @@ deviceList.addEventListener("click", (event) => {
 sessionAction.addEventListener("click", async () => {
   const device = selectedDevice();
   if (!device) return;
+  if (device.platform === "ios") {
+    await handleIosSessionAction(device);
+    return;
+  }
   const state = localSessionStates.get(device.id) ?? sessionsByDevice.get(device.id)?.state;
   if (state === "running") {
     localSessionStates.set(device.id, "stopping");
@@ -417,10 +602,277 @@ screenInputs.forEach((input) => input.addEventListener("change", () => {
   preferencesFor(device.id).screenOff = input.value === "on";
 }));
 
+// ---------------------------------------------------------------------------
+// 界面 C：iPhone 控制面板
+// ---------------------------------------------------------------------------
+
+function iosStateText(state) {
+  if (state === "starting") return text.sessionStarting;
+  if (state === "stopping") return text.sessionStopping;
+  if (state === "failed") return describeError(iosStatus.code ?? "session_failed");
+  if (state === "running") return text.sessionRunning;
+  return text.iosDisconnected;
+}
+
+/// 只做「平台决定的骨架」：显示哪些卡片、按钮在不在。每秒轮询走 applyIosStatus。
+function renderIosPanel() {
+  androidPanel.hidden = true;
+  iosPanel.hidden = false;
+  const isMac = iosGuidanceOnly();
+  document.querySelector("#session-connection").textContent = text.ios;
+  showMirrorButton.hidden = true;
+  // macOS 上根本不给「开始控制」：那条路的产品答案是系统「iPhone 镜像」。
+  // 后端的 `macos_uses_iphone_mirroring` 是第二道闸，不是这里的提示来源。
+  sessionAction.hidden = isMac;
+  iosStageColumn.hidden = isMac;
+  iosTextCard.hidden = isMac;
+  iosActionCard.hidden = isMac;
+  iosMirroringCard.hidden = !isMac;
+  if (isMac) {
+    openMirroringButton.disabled = !mirroringAvailable;
+    mirroringNote.hidden = mirroringAvailable;
+    mirroringNote.textContent = mirroringAvailable ? "" : text.iosMirroringUnavailable;
+  }
+  applyIosStatus();
+}
+
+/// 每秒轮询只改文案与 disabled，绝不重建 DOM、绝不碰 `img.src`。
+function applyIosStatus() {
+  const device = selectedDevice();
+  if (!device || device.platform !== "ios") return;
+  const state = iosOwnsSelectedDevice() ? iosStatus.state : "idle";
+  const unowned = iosSessionIsUnowned();
+  const running = state === "running";
+  const locked = running && iosStatus.locked === true;
+
+  document.querySelector("#session-state").textContent = unowned
+    ? text.iosSessionElsewhere
+    : iosStateText(state);
+  const disconnecting = state === "running" || state === "stopping" || unowned;
+  sessionAction.textContent = disconnecting ? text.disconnect : text.startControl;
+  sessionAction.classList.toggle("btn-primary", !disconnecting);
+  sessionAction.classList.toggle("btn-disconnect", disconnecting);
+  sessionAction.disabled = state === "starting" || state === "stopping";
+
+  iosFpsTag.textContent = running
+    ? text.iosConnected.replace("{fps}", String(iosStatus.fps ?? 0))
+    : unowned
+      ? text.iosSessionElsewhere
+      : iosStateText(state);
+  iosLockedNote.hidden = !locked;
+  // 画面容器按设备长宽比定尺；后端用同一个 window 算内容矩形，两边的 letterbox
+  // 才是同一个（见 `content_point`）。
+  const window_ = running ? iosStatus.window : null;
+  iosStage.style.aspectRatio = window_ ? `${window_.width} / ${window_.height}` : "";
+  iosStage.classList.toggle("is-live", running);
+
+  // 锁定时不转发文字：WDA 在锁屏下返回成功但字符不送达（真机测量）。
+  iosTextInput.disabled = !running || locked;
+  iosSendButton.disabled = !running || locked;
+  [iosWakeButton, iosCaptureButton, iosHomeButton].forEach((button) => {
+    button.disabled = !running;
+  });
+
+  syncIosStream();
+  iosStagePlaceholder.hidden = iosStreaming;
+}
+
+/// MJPEG 是无限流：`src` **只在状态迁移时**设置或清空。每秒重设会让画面每秒重连。
+function syncIosStream() {
+  const device = selectedDevice();
+  const shouldStream =
+    !iosGuidanceOnly() &&
+    Boolean(device) &&
+    device.platform === "ios" &&
+    device.id === iosSessionDeviceId &&
+    iosStatus.state === "running" &&
+    Boolean(iosStatus.proxy_port);
+  if (shouldStream === iosStreaming) return;
+  iosStreaming = shouldStream;
+  if (shouldStream) {
+    iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/`;
+  } else {
+    iosStream.removeAttribute("src");
+  }
+}
+
+async function pollIosStatus() {
+  const device = selectedDevice();
+  // 选中 Android 设备时也要继续轮询**自己拥有的** iOS 会话：否则会话死了，侧栏
+  // 还在标「正在控制」，切回来的那一秒还会拿陈旧的 proxy_port 去设 img.src。
+  if (iosGuidanceOnly() || !(device?.platform === "ios" || iosSessionDeviceId)) return;
+  // 一次轮询里有两次 5 秒超时的 WDA 查询，不加闸会越堆越多。
+  if (iosPollInFlight) return;
+  iosPollInFlight = true;
+  const wasControlled = Boolean(device) && deviceIsControlled(device);
+  try {
+    iosStatus = await window.__TAURI__.core.invoke("ios_session_status");
+    if (iosStatus.state === "idle") iosSessionDeviceId = undefined;
+  } catch (error) {
+    console.error("ios_session_status failed", error);
+  } finally {
+    iosPollInFlight = false;
+  }
+  applyIosStatus();
+  // 侧栏的「正在控制」只在状态真的翻转时重建，避免每秒重画设备列表。
+  if ((Boolean(device) && deviceIsControlled(device)) !== wasControlled) renderDevices();
+}
+
+// 断开后端最多走 7 秒的终止梯子；期间保持「正在断开连接…」。
+async function waitForIosSettled() {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    try {
+      const status = await window.__TAURI__.core.invoke("ios_session_status");
+      if (!iosSessionIsLive(status.state)) return;
+    } catch (error) {
+      console.error("ios_session_status failed", error);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+async function handleIosSessionAction(device) {
+  const state = iosOwnsSelectedDevice() ? iosStatus.state : "idle";
+  if (iosSessionIsLive(state) || iosSessionIsUnowned()) {
+    iosStatus = { ...iosStatus, state: "stopping" };
+    applyIosStatus();
+    try {
+      await window.__TAURI__.core.invoke("stop_ios_session");
+      await waitForIosSettled();
+    } catch (error) {
+      console.error("stop_ios_session failed", error);
+    }
+    iosSessionDeviceId = undefined;
+    iosStatus = { state: "idle", fps: 0 };
+    applyIosStatus();
+    renderDevices();
+    await refreshDevices();
+    return;
+  }
+  iosSessionDeviceId = device.id;
+  iosStatus = { state: "starting", fps: 0 };
+  applyIosStatus();
+  try {
+    await window.__TAURI__.core.invoke("start_ios_session", { deviceId: device.id });
+    await pollIosStatus();
+  } catch (error) {
+    console.error("start_ios_session failed", error);
+    iosSessionDeviceId = undefined;
+    // 后端只回稳定错误码；describeError 负责翻译。
+    iosStatus = { state: "failed", code: String(error), fps: 0 };
+    applyIosStatus();
+  }
+  renderDevices();
+}
+
+function showIosNote(target, message) {
+  target.textContent = message;
+  target.hidden = false;
+}
+
+async function invokeIosAction(command, args, onSuccess) {
+  try {
+    const result = await window.__TAURI__.core.invoke(command, args);
+    onSuccess(result);
+  } catch (error) {
+    console.error(`${command} failed`, error);
+    showIosNote(iosActionResult, describeError(String(error)));
+  }
+}
+
+iosStage.addEventListener("click", async (event) => {
+  if (!iosOwnsSelectedDevice() || iosStatus.state !== "running") return;
+  // 锁定时点画面 = 唤醒屏幕，不转发点按（锁屏下点按不产生效果）。
+  if (iosStatus.locked === true) {
+    await invokeIosAction("ios_wake", undefined, () => {
+      iosActionResult.hidden = true;
+    });
+    return;
+  }
+  const rect = iosStage.getBoundingClientRect();
+  // 传容器内像素坐标 + 容器尺寸，由后端按设备长宽比算内容矩形并归一化。
+  await invokeIosAction(
+    "ios_tap",
+    {
+      xPx: event.clientX - rect.left,
+      yPx: event.clientY - rect.top,
+      widthPx: rect.width,
+      heightPx: rect.height,
+    },
+    () => {
+      iosActionResult.hidden = true;
+    },
+  );
+});
+
+async function sendIosText() {
+  const value = iosTextInput.value;
+  if (!value.trim()) return;
+  iosSendButton.disabled = true;
+  try {
+    await window.__TAURI__.core.invoke("ios_send_text", { text: value });
+    showIosNote(iosTextResult, text.iosTextSent);
+    iosTextInput.value = "";
+  } catch (error) {
+    console.error("ios_send_text failed", error);
+    showIosNote(iosTextResult, describeError(String(error)));
+  }
+  iosSendButton.disabled = false;
+}
+
+iosSendButton.addEventListener("click", sendIosText);
+iosTextInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    sendIosText();
+  }
+});
+
+iosWakeButton.addEventListener("click", () =>
+  invokeIosAction("ios_wake", undefined, () => {
+    iosActionResult.hidden = true;
+  }),
+);
+iosHomeButton.addEventListener("click", () =>
+  invokeIosAction("ios_home", undefined, () => {
+    iosActionResult.hidden = true;
+  }),
+);
+iosCaptureButton.addEventListener("click", () =>
+  invokeIosAction("ios_screenshot", undefined, (path) => {
+    showIosNote(iosActionResult, text.iosScreenshotSaved.replace("{path}", path));
+  }),
+);
+
+openMirroringButton.addEventListener("click", async () => {
+  try {
+    await window.__TAURI__.core.invoke("open_iphone_mirroring");
+    mirroringNote.hidden = true;
+  } catch (error) {
+    console.error("open_iphone_mirroring failed", error);
+    showIosNote(mirroringNote, describeError(String(error)));
+  }
+});
+
+async function loadHostPlatform() {
+  try {
+    hostPlatform = await window.__TAURI__.core.invoke("host_platform");
+    mirroringAvailable = await window.__TAURI__.core.invoke("iphone_mirroring_available");
+    iosDevWda = await window.__TAURI__.core.invoke("ios_dev_wda_enabled");
+  } catch (error) {
+    console.error("host_platform failed", error);
+  }
+  renderSession();
+}
+
 renderDevices();
 renderSession();
+loadHostPlatform();
 refreshDevices();
 window.setInterval(refreshDevices, 5000);
+window.setInterval(pollIosStatus, 1000);
 
 const backdrop = document.querySelector("#pairing-backdrop");
 const dialog = backdrop.querySelector(".dialog");

@@ -921,9 +921,180 @@ button:disabled {
   width: 100%;
 }
 
+/* ---------------------------------------------------------------------------
+   界面 C：iPhone 控制面板
+   --------------------------------------------------------------------------- */
+
+/* 平台面板互斥显示：同一时刻只有 Android 或 iPhone 一套内容可见。 */
+.platform-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  gap: 20px;
+}
+
+.ios-stage-column {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 画面区高度固定，宽度由长宽比推出：`aspect-ratio` 由 main.js 按后端上报的
+   设备点尺寸设置，没有窗口尺寸时退回设计稿的 246×500 占位。写 aspect-ratio 而
+   不是写死宽度，是为了让下面 max-height 的缩档自动带着宽度一起变。 */
+.ios-stage {
+  position: relative;
+  display: grid;
+  aspect-ratio: 246 / 500;
+  height: 500px;
+  flex: none;
+  overflow: hidden;
+  place-items: center;
+  border-radius: 28px;
+  background: repeating-linear-gradient(
+    45deg,
+    var(--color-neutral-200),
+    var(--color-neutral-200) 12px,
+    var(--color-neutral-100) 12px,
+    var(--color-neutral-100) 24px
+  );
+  box-shadow: var(--shadow-md);
+}
+
+.ios-stage.is-live {
+  background: var(--color-neutral-900);
+  cursor: pointer;
+}
+
+/* `contain` 是坐标换算的前提：后端按同一规则算内容矩形（`content_point`）。
+   换成 cover 或 fill，点按就会整体偏移。 */
+.ios-stream {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.ios-stage-placeholder {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px;
+  color: var(--color-neutral-700);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: center;
+  white-space: pre-line;
+}
+
+.ios-locked {
+  max-width: 246px;
+  margin: 0;
+  color: var(--color-accent-700);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ios-text-card,
+.ios-action-card {
+  padding: var(--space-3);
+}
+
+.ios-text-row {
+  display: flex;
+  gap: 8px;
+}
+
+.ios-text-row .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.ios-action-card {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ios-note {
+  width: 100%;
+  margin: 0;
+  color: var(--color-neutral-700);
+  font-size: 12px;
+}
+
+.ios-note-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  background: var(--color-neutral-100);
+}
+
+.ios-note-card h2 {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ios-note-card p {
+  margin: 0;
+  color: var(--color-neutral-700);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ios-guidance-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--color-accent-2-100);
+  color: var(--color-accent-2-800);
+}
+
+.ios-guidance-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ios-guidance-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ios-guidance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ios-guidance-card .ios-note {
+  width: auto;
+  color: var(--color-accent-2-800);
+}
+
 @media (max-height: 680px) {
   .session {
     padding-block: 22px;
+  }
+
+  /* 小窗口里 500px 的画面区放不下，按比例缩一档（宽度由 JS 同步换算）。 */
+  .ios-stage {
+    height: 420px;
   }
 
   .phone-placeholder {

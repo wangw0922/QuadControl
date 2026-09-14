@@ -1,13 +1,17 @@
 use adb_probe::{AdbCommand, CommandRunner, ExecutionError, ProbeError, SystemRunner};
 use quadcontrol_android::wireless::{self, PairCancel, ROUND_TIMEOUT};
 use quadcontrol_android::{SessionHandle, SessionStatus, SHUTDOWN_DEADLINE};
+use quadcontrol_ios::session::{
+    ExitReason, IosLaunchOptions, IosSessionHandle, IosSessionStatus, LaunchMode, WdaIds,
+    IOS_SHUTDOWN_DEADLINE,
+};
+use quadcontrol_ios::wda::WindowSize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
 #[derive(Debug, Serialize)]
@@ -248,91 +252,18 @@ fn session_dto(device_id: String, status: SessionStatus) -> SessionDto {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct IosDevice {
-    id: String,
-    name: String,
-}
-
-/// go-ios 的 `ios list` 默认输出 JSON（`{"deviceList":["<udid>", ...]}`）。
-/// 这里手写最小提取，避免为一个字段引入 JSON 依赖；同时兼容按行输出的形态。
+/// iOS 设备发现走 [`quadcontrol_ios::list_devices`]（P4.1 起是唯一实现）。
 ///
-/// **未经真机验证**：本机没有 go-ios，格式依据其文档而非实测——P4 接 iPhone
-/// 面板时用真设备复核。
-fn parse_ios_devices(output: &str) -> Result<Vec<IosDevice>, String> {
-    let udids = if let Some(list) = extract_device_list(output) {
-        list
-    } else {
-        output
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .filter(|line| !line.eq_ignore_ascii_case("list of attached devices:"))
-            .map(|line| line.strip_prefix("UDID:").unwrap_or(line).trim().to_owned())
-            .collect()
-    };
-
-    udids
-        .into_iter()
-        .map(|udid| {
-            if udid.is_empty() || udid.contains(char::is_whitespace) {
-                return Err("go-ios returned an unparsable device list".to_owned());
-            }
-            Ok(IosDevice {
-                name: short_ios_name(&udid),
-                id: udid,
-            })
-        })
-        .collect()
-}
-
-/// 从 `{"deviceList":["a","b"]}` 里取出数组元素；不是这个形状就返回 None。
-fn extract_device_list(output: &str) -> Option<Vec<String>> {
-    let start = output.find("\"deviceList\"")?;
-    let open = output[start..].find('[')? + start;
-    let close = output[open..].find(']')? + open;
-    Some(
-        output[open + 1..close]
-            .split(',')
-            .map(|item| item.trim().trim_matches('"').to_owned())
-            .filter(|item| !item.is_empty())
-            .collect(),
-    )
-}
-
-/// 界面上不显示完整 UDID：又长又不可读，且没必要把完整设备标识摆在屏幕上。
-fn short_ios_name(udid: &str) -> String {
-    let tail: String = udid
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("iPhone ····{tail}")
-}
-
-fn list_ios_devices() -> Result<Vec<IosDevice>, &'static str> {
-    let binary = std::env::var_os("IOS_BIN").unwrap_or_else(|| "ios".into());
-    let output = Command::new(binary).arg("list").output().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            "ios_not_found"
-        } else {
-            eprintln!("go-ios could not be executed: {error}");
-            "ios_failed"
+/// 只保留 `ios_not_found` / `ios_failed` 两个界面码里的第一个作为特例：其余一律
+/// 用库的稳定码，界面才能区分「usbmuxd 没跑」这种可自救的场景。
+fn list_ios_devices() -> Result<Vec<quadcontrol_ios::IosDevice>, String> {
+    let ios = quadcontrol_ios::resolve_ios(None);
+    quadcontrol_ios::list_devices(&ios).map_err(|error| {
+        eprintln!("go-ios device discovery failed: {error}");
+        match error {
+            quadcontrol_ios::Error::IosNotFound(_) => "ios_not_found".to_owned(),
+            other => other.code().to_owned(),
         }
-    })?;
-    if !output.status.success() {
-        eprintln!(
-            "go-ios `ios list` exited with {}",
-            output.status.code().unwrap_or(-1)
-        );
-        return Err("ios_failed");
-    }
-    parse_ios_devices(&String::from_utf8_lossy(&output.stdout)).map_err(|reason| {
-        eprintln!("go-ios output rejected: {reason}");
-        "ios_failed"
     })
 }
 
@@ -392,18 +323,19 @@ fn list_devices_blocking() -> DeviceListDto {
         })
         .collect::<Vec<_>>();
 
+    // go-ios 列得出来就是可连接：iOS 侧的「配对」是系统级信任，不是我们的流程。
     let ios_error = match list_ios_devices() {
         Ok(ios_devices) => {
             devices.extend(ios_devices.into_iter().map(|device| DeviceDto {
                 id: device.id,
                 name: device.name,
                 platform: "ios".to_owned(),
-                status: "pairing_required".to_owned(),
+                status: "available".to_owned(),
                 detail: None,
             }));
             None
         }
-        Err(code) => Some(code.to_owned()),
+        Err(code) => Some(code),
     };
 
     DeviceListDto {
@@ -413,59 +345,503 @@ fn list_devices_blocking() -> DeviceListDto {
     }
 }
 
+// ---------------------------------------------------------------------------
+// iPhone 控制面板（界面 C）
+// ---------------------------------------------------------------------------
+
+/// WDA 的三个标识默认值。
+///
+/// **未真机校准**：这些是 go-ios 与 WebDriverAgent 的上游默认值，而个人开发者
+/// 团队签不了 `com.facebook.*`，所以真实使用几乎一定要用下面三个环境变量覆盖。
+/// 设置界面归 P7。
+const DEFAULT_WDA_BUNDLE_ID: &str = "com.facebook.WebDriverAgentRunner.xctrunner";
+const DEFAULT_WDA_TESTRUNNER_ID: &str = "com.facebook.WebDriverAgentRunner.xctrunner";
+const DEFAULT_WDA_XCTESTCONFIG: &str = "WebDriverAgentRunner.xctest";
+
+/// macOS 的系统「iPhone 镜像」。存在与否 = 系统版本够不够（macOS 15+）。
+const IPHONE_MIRRORING_APP: &str = "/System/Applications/iPhone Mirroring.app";
+
+/// 同一时刻最多一个 iOS 会话（跨设备）。
+///
+/// 不是偷懒：go-ios 的隧道信息服务是每主机一份，多隧道行为我们没验证过
+/// （`IOS_PANEL_PLAN.md` §一）。多设备是 P4 之后的事。
+struct IosSessionStore {
+    session: Mutex<Option<IosSessionHandle>>,
+    /// 与 `SessionStore::next_id` 同理：Windows 上起不了会话，这个计数器用不上。
+    #[cfg_attr(windows, allow(dead_code))]
+    next_id: AtomicU64,
+    meta: Mutex<IosMeta>,
+}
+
+/// 会话的派生量：帧率差分的上一帧快照与最近一次窗口尺寸。
+///
+/// 窗口尺寸要缓存，是因为前端按同一个值给画面容器定尺；`ios_tap` 用缓存值算
+/// 内容矩形，前后端才对得上同一个 letterbox。
+#[derive(Default)]
+struct IosMeta {
+    frames: Option<(u64, Instant)>,
+    fps: u32,
+    window: Option<WindowSize>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct WindowDto {
+    width: u32,
+    height: u32,
+}
+
+/// 会话状态 DTO。
+///
+/// **绝不含 `stderr_tail` 与 UDID**：iOS 子进程的 stderr 尾部带着 UDID 与
+/// bundle id（`IOS_PANEL_PLAN.md` §二的红线），只写本进程 stderr。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct IosStatusDto {
+    state: String,
+    code: Option<String>,
+    exit_reason: Option<String>,
+    proxy_port: Option<u16>,
+    fps: u32,
+    locked: Option<bool>,
+    window: Option<WindowDto>,
+}
+
+fn ios_idle_dto() -> IosStatusDto {
+    IosStatusDto {
+        state: "idle".into(),
+        code: None,
+        exit_reason: None,
+        proxy_port: None,
+        fps: 0,
+        locked: None,
+        window: None,
+    }
+}
+
+fn ios_status_dto(status: &IosSessionStatus) -> IosStatusDto {
+    let mut dto = ios_idle_dto();
+    match status {
+        IosSessionStatus::Starting => dto.state = "starting".into(),
+        IosSessionStatus::Running { proxy_port } => {
+            dto.state = "running".into();
+            dto.proxy_port = Some(*proxy_port);
+        }
+        IosSessionStatus::Stopping => dto.state = "stopping".into(),
+        IosSessionStatus::Exited { reason } => {
+            dto.state = "exited".into();
+            dto.exit_reason = Some(
+                match reason {
+                    ExitReason::Requested => "requested",
+                    ExitReason::ChildExited { .. } => "child_exited",
+                    ExitReason::UpstreamClosed => "upstream_closed",
+                }
+                .into(),
+            );
+        }
+        IosSessionStatus::Failed { code } => {
+            dto.state = "failed".into();
+            dto.code = Some((*code).into());
+        }
+    }
+    dto
+}
+
+/// 两次计帧快照的差分。
+///
+/// 间隔过短就沿用上一次的值：1 秒轮询偶尔会被前一次的 HTTP 超时挤在一起，
+/// 除以一个接近零的间隔会得到荒谬的帧率。
+fn diff_fps(previous: Option<(u64, Instant)>, frames: u64, now: Instant, last: u32) -> u32 {
+    let Some((previous_frames, previous_at)) = previous else {
+        return 0;
+    };
+    let elapsed = now.saturating_duration_since(previous_at);
+    if elapsed < Duration::from_millis(200) {
+        return last;
+    }
+    let delta = frames.saturating_sub(previous_frames) as f64;
+    (delta / elapsed.as_secs_f64()).round() as u32
+}
+
+/// 容器内像素坐标 → 设备点坐标。
+///
+/// 画面是 `object-fit: contain`，容器与设备长宽比不同时必然留黑边；按容器尺寸
+/// 直接线性换算会让点按整体偏移。这里先算内容矩形，再归一化，最后乘设备点尺寸。
+/// 落在黑边上的点返回 None（调用方不转发）。
+fn content_point(
+    x_px: f64,
+    y_px: f64,
+    container_w: f64,
+    container_h: f64,
+    window: WindowSize,
+) -> Option<(f64, f64)> {
+    if container_w <= 0.0 || container_h <= 0.0 || window.width == 0 || window.height == 0 {
+        return None;
+    }
+    let (window_w, window_h) = (f64::from(window.width), f64::from(window.height));
+    let scale = (container_w / window_w).min(container_h / window_h);
+    let (content_w, content_h) = (window_w * scale, window_h * scale);
+    let normalized_x = (x_px - (container_w - content_w) / 2.0) / content_w;
+    let normalized_y = (y_px - (container_h - content_h) / 2.0) / content_h;
+    if !(0.0..=1.0).contains(&normalized_x) || !(0.0..=1.0).contains(&normalized_y) {
+        return None;
+    }
+    Some((normalized_x * window_w, normalized_y * window_h))
+}
+
+/// 取一个可用的 WDA 客户端；会话没在跑就是 `ios_session_not_running`。
+///
+/// 只在锁内做 `client()`（克隆很便宜），**绝不持锁发 HTTP**：一次 5 秒超时的
+/// 请求会把整个状态轮询一起堵住。
+fn ios_client(store: &IosSessionStore) -> Result<quadcontrol_ios::wda::Client, String> {
+    let session = store
+        .session
+        .lock()
+        .map_err(|_| "ios_session_not_running".to_owned())?;
+    session
+        .as_ref()
+        .and_then(IosSessionHandle::client)
+        .ok_or_else(|| "ios_session_not_running".to_owned())
+}
+
+/// 在阻塞线程池里跑一次 WDA 调用。
+async fn ios_call<T, F>(store: &IosSessionStore, call: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&quadcontrol_ios::wda::Client) -> Result<T, quadcontrol_ios::Error> + Send + 'static,
+{
+    let client = ios_client(store)?;
+    tauri::async_runtime::spawn_blocking(move || call(&client))
+        .await
+        .map_err(|error| {
+            eprintln!("iOS command worker failed: {error}");
+            "ios_process_error".to_owned()
+        })?
+        .map_err(|error| {
+            eprintln!("iOS command failed: {error}");
+            error.code().to_owned()
+        })
+}
+
+/// 截图落盘目录：系统「图片」目录 → home → 报错。
+fn screenshot_path(now: chrono::DateTime<chrono::Local>) -> Result<std::path::PathBuf, String> {
+    let directory = dirs::picture_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "screenshot_failed".to_owned())?;
+    Ok(directory.join(format!("QuadControl-{}.png", now.format("%Y%m%d-%H%M%S"))))
+}
+
+/// 起 iOS 会话的平台闸门。
+///
+/// 用运行时 `cfg!` 而不是 `#[cfg]` 分支：后者会让另外两个平台上的整段代码变成
+/// 死代码，而 CI 是 `-D warnings`。
+fn ios_launch_allowed() -> Result<(), String> {
+    if cfg!(windows) {
+        // Job Object 之前收不回进程树，与 Android 同理直接拒绝（P6）。
+        return Err("windows_session_unsupported".into());
+    }
+    if cfg!(target_os = "macos") {
+        // macOS 的产品路径是系统「iPhone 镜像」引导卡，不起 WDA 链路。仅 debug
+        // 构建 + 显式环境变量时放行，用于本机真机验收；界面上也不显示这个按钮，
+        // 这里是第二道闸。
+        let dev_path = cfg!(debug_assertions)
+            && std::env::var("QUADCONTROL_IOS_DEV_WDA").as_deref() == Ok("1");
+        if !dev_path {
+            return Err("macos_uses_iphone_mirroring".into());
+        }
+    }
+    Ok(())
+}
+
+fn wda_ids_from_env() -> WdaIds {
+    let read = |name: &str, fallback: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| fallback.to_owned())
+    };
+    WdaIds {
+        bundle_id: read("QUADCONTROL_WDA_BUNDLE_ID", DEFAULT_WDA_BUNDLE_ID),
+        testrunner_id: read("QUADCONTROL_WDA_TESTRUNNER_ID", DEFAULT_WDA_TESTRUNNER_ID),
+        xctestconfig: read("QUADCONTROL_WDA_XCTESTCONFIG", DEFAULT_WDA_XCTESTCONFIG),
+    }
+}
+
+fn ios_session_is_live(status: &IosSessionStatus) -> bool {
+    matches!(
+        status,
+        IosSessionStatus::Starting | IosSessionStatus::Running { .. } | IosSessionStatus::Stopping
+    )
+}
+
+#[tauri::command]
+async fn host_platform() -> Result<String, String> {
+    Ok(if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+    .to_owned())
+}
+
+/// macOS 开发路径是否放行（debug 构建 + `QUADCONTROL_IOS_DEV_WDA=1`）。
+///
+/// 前端据此在 macOS 上切到 Win/Linux 的完整面板版式，这是方案 §四真机验收
+/// 步骤 2–3 的唯一入口；release 构建里恒为 false，产品路径仍只有引导卡。
+#[tauri::command]
+async fn ios_dev_wda_enabled() -> Result<bool, String> {
+    Ok(cfg!(target_os = "macos") && ios_launch_allowed().is_ok())
+}
+
+#[tauri::command]
+async fn start_ios_session(
+    store: tauri::State<'_, IosSessionStore>,
+    device_id: String,
+) -> Result<(), String> {
+    ios_launch_allowed()?;
+    let store = store.inner();
+    let id = {
+        let mut session = store
+            .session
+            .lock()
+            .map_err(|_| "ios_process_error".to_owned())?;
+        if let Some(existing) = session.as_ref() {
+            if ios_session_is_live(&existing.status()) {
+                return Err("ios_session_already_running".into());
+            }
+        }
+        // 上一个已经是 Exited / Failed：换掉它。
+        *session = None;
+        store.next_id.fetch_add(1, Ordering::Relaxed)
+    };
+    // GUI 只起完整链路；`LaunchMode::Attach` 只存在于库与其测试里（方案 §三）。
+    let options = IosLaunchOptions::new(
+        device_id,
+        LaunchMode::Launch {
+            ios: quadcontrol_ios::resolve_ios(None),
+            wda: wda_ids_from_env(),
+            env: Vec::new(),
+        },
+    );
+    // `spawn_supervised` 会跑 `ios version` 与端口探测（阻塞），不能占着 async
+    // 运行时，也不能在持锁期间做。
+    let spawned = tauri::async_runtime::spawn_blocking(move || {
+        quadcontrol_ios::session::spawn_supervised(&options, id)
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("iOS session start worker failed: {error}");
+        "ios_process_error".to_owned()
+    })?;
+    let handle = spawned.map_err(|error| {
+        eprintln!("iOS session start failed: {error}");
+        error.code().to_owned()
+    })?;
+    let mut session = store
+        .session
+        .lock()
+        .map_err(|_| "ios_process_error".to_owned())?;
+    if let Some(existing) = session.as_ref() {
+        // 预检期间被另一次调用抢先：不能有两条 WDA 链路，把刚起的这份收回。
+        if ios_session_is_live(&existing.status()) {
+            let _ = handle.request_stop();
+            return Err("ios_session_already_running".into());
+        }
+    }
+    *session = Some(handle);
+    if let Ok(mut meta) = store.meta.lock() {
+        *meta = IosMeta::default();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_ios_session(store: tauri::State<'_, IosSessionStore>) -> Result<(), String> {
+    let store = store.inner();
+    let session = store
+        .session
+        .lock()
+        .map_err(|_| "ios_process_error".to_owned())?;
+    if let Some(handle) = session.as_ref() {
+        handle.request_stop().map_err(|error| {
+            eprintln!("iOS session stop failed: {error}");
+            "ios_process_error".to_owned()
+        })?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn ios_session_status(
+    store: tauri::State<'_, IosSessionStore>,
+) -> Result<IosStatusDto, String> {
+    let store = store.inner();
+    let snapshot = {
+        let session = store
+            .session
+            .lock()
+            .map_err(|_| "ios_process_error".to_owned())?;
+        session
+            .as_ref()
+            .map(|handle| (handle.status(), handle.stats().frames, handle.client()))
+    };
+    let Some((status, frames, client)) = snapshot else {
+        return Ok(ios_idle_dto());
+    };
+    let mut dto = ios_status_dto(&status);
+    if dto.state != "running" {
+        if let Ok(mut meta) = store.meta.lock() {
+            *meta = IosMeta::default();
+        }
+        return Ok(dto);
+    }
+    let now = Instant::now();
+    if let Ok(mut meta) = store.meta.lock() {
+        meta.fps = diff_fps(meta.frames, frames, now, meta.fps);
+        meta.frames = Some((frames, now));
+        dto.fps = meta.fps;
+        dto.window = meta.window.map(|window| WindowDto {
+            width: window.width,
+            height: window.height,
+        });
+    }
+    if let Some(client) = client {
+        // 两次查询各自带 5 秒超时（`wda::REQUEST_TIMEOUT`）；查不到就保持原值，
+        // 不把一次瞬时超时升级成「会话失败」。
+        let (locked, window) = tauri::async_runtime::spawn_blocking(move || {
+            (client.locked().ok(), client.window_size().ok())
+        })
+        .await
+        .unwrap_or((None, None));
+        dto.locked = locked;
+        if let Some(window) = window {
+            dto.window = Some(WindowDto {
+                width: window.width,
+                height: window.height,
+            });
+            if let Ok(mut meta) = store.meta.lock() {
+                meta.window = Some(window);
+            }
+        }
+    }
+    Ok(dto)
+}
+
+#[tauri::command]
+async fn ios_tap(
+    store: tauri::State<'_, IosSessionStore>,
+    x_px: f64,
+    y_px: f64,
+    width_px: f64,
+    height_px: f64,
+) -> Result<(), String> {
+    let store = store.inner();
+    // 用状态轮询缓存的窗口尺寸：前端的画面容器按同一个值定尺，两边才算出同一个
+    // 内容矩形。缓存为空（刚起、还没轮询到）才现查一次。
+    let cached = store.meta.lock().ok().and_then(|meta| meta.window);
+    let client = ios_client(store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let window = match cached {
+            Some(window) => window,
+            None => client.window_size()?,
+        };
+        match content_point(x_px, y_px, width_px, height_px, window) {
+            // 点在黑边上：不转发，也不是错误。
+            None => Ok(()),
+            Some((x_pt, y_pt)) => client.tap(x_pt, y_pt),
+        }
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("iOS tap worker failed: {error}");
+        "ios_process_error".to_owned()
+    })?
+    .map_err(|error| {
+        eprintln!("iOS tap failed: {error}");
+        error.code().to_owned()
+    })
+}
+
+#[tauri::command]
+async fn ios_send_text(
+    store: tauri::State<'_, IosSessionStore>,
+    text: String,
+) -> Result<(), String> {
+    ios_call(store.inner(), move |client| client.send_text(&text)).await
+}
+
+#[tauri::command]
+async fn ios_home(store: tauri::State<'_, IosSessionStore>) -> Result<(), String> {
+    ios_call(store.inner(), |client| client.home()).await
+}
+
+#[tauri::command]
+async fn ios_wake(store: tauri::State<'_, IosSessionStore>) -> Result<(), String> {
+    ios_call(store.inner(), |client| client.wake()).await
+}
+
+#[tauri::command]
+async fn ios_screenshot(store: tauri::State<'_, IosSessionStore>) -> Result<String, String> {
+    let png = ios_call(store.inner(), |client| client.screenshot_png()).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = screenshot_path(chrono::Local::now())?;
+        std::fs::write(&path, png).map_err(|error| {
+            eprintln!("screenshot could not be written: {error}");
+            "screenshot_failed".to_owned()
+        })?;
+        Ok(path.display().to_string())
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("screenshot worker failed: {error}");
+        "screenshot_failed".to_owned()
+    })?
+}
+
+#[tauri::command]
+async fn iphone_mirroring_available() -> Result<bool, String> {
+    Ok(cfg!(target_os = "macos") && std::path::Path::new(IPHONE_MIRRORING_APP).exists())
+}
+
+/// 只是把系统应用调到前台。**不驱动、不注入、不自动化**它（方案 §一）。
+#[tauri::command]
+async fn open_iphone_mirroring() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("unsupported".into());
+    }
+    let status = tauri::async_runtime::spawn_blocking(|| {
+        std::process::Command::new("open")
+            .args(["-b", "com.apple.ScreenContinuity"])
+            .status()
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("iPhone Mirroring worker failed: {error}");
+        "iphone_mirroring_failed".to_owned()
+    })?
+    .map_err(|error| {
+        eprintln!("iPhone Mirroring could not be opened: {error}");
+        "iphone_mirroring_failed".to_owned()
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        eprintln!("`open -b com.apple.ScreenContinuity` exited with {status}");
+        Err("iphone_mirroring_failed".to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_device_list, pairing_status_from, parse_ios_devices, set_pairing_result,
-        short_ios_name, PairingState, PairingStore,
+        content_point, diff_fps, ios_status_dto, pairing_status_from, screenshot_path,
+        set_pairing_result, ExitReason, IosSessionStatus, PairingState, PairingStore, WindowDto,
+        WindowSize,
     };
+    use chrono::TimeZone;
     use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn parses_go_ios_json_device_list() {
-        let devices =
-            parse_ios_devices(r#"{"deviceList":["REDACTEDSERIAL1","REDACTEDSERIAL2"]}"#).unwrap();
-
-        assert_eq!(devices.len(), 2);
-        assert_eq!(devices[0].id, "REDACTEDSERIAL1");
-        assert_eq!(devices[0].name, "iPhone ····IAL1");
-    }
-
-    #[test]
-    fn parses_plain_line_device_list() {
-        let devices =
-            parse_ios_devices("List of attached devices:\nREDACTEDSERIAL\nUDID: REDACTEDSERIAL2\n")
-                .unwrap();
-
-        assert_eq!(devices.len(), 2);
-        assert_eq!(devices[1].id, "REDACTEDSERIAL2");
-    }
-
-    #[test]
-    fn empty_output_yields_no_devices() {
-        assert!(parse_ios_devices("").unwrap().is_empty());
-        assert!(parse_ios_devices(r#"{"deviceList":[]}"#)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn rejects_unparsable_line() {
-        assert!(parse_ios_devices("REDACTEDSERIAL with-space\n").is_err());
-    }
-
-    #[test]
-    fn ignores_non_matching_json_shape() {
-        assert!(extract_device_list(r#"{"other":[1]}"#).is_none());
-    }
-
-    #[test]
-    fn short_name_keeps_only_the_tail() {
-        assert_eq!(short_ios_name("REDACTEDSERIAL"), "iPhone ····RIAL");
-        assert_eq!(short_ios_name("ab"), "iPhone ····ab");
-    }
 
     #[test]
     fn manual_pair_inputs_require_ip_literal_port_and_six_digits() {
@@ -494,6 +870,176 @@ mod tests {
         assert_eq!(
             pairing_status_from(&store.state.lock().unwrap()).state,
             "waiting"
+        );
+    }
+
+    /// iPhone SE 3 的点尺寸；letterbox 的三种形态都用它当被控设备。
+    const SE3: WindowSize = WindowSize {
+        width: 375,
+        height: 667,
+    };
+
+    fn approx(actual: (f64, f64), expected: (f64, f64)) {
+        assert!(
+            (actual.0 - expected.0).abs() < 0.01 && (actual.1 - expected.1).abs() < 0.01,
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn tap_maps_through_the_content_rect_without_letterbox() {
+        // 容器与设备同比例：中心点还是中心点，右下角还是右下角。
+        approx(
+            content_point(187.5, 333.5, 375.0, 667.0, SE3).unwrap(),
+            (187.5, 333.5),
+        );
+        approx(
+            content_point(375.0, 667.0, 375.0, 667.0, SE3).unwrap(),
+            (375.0, 667.0),
+        );
+    }
+
+    #[test]
+    fn tap_accounts_for_pillarbox_bars_on_the_sides() {
+        // 容器 500×667 比设备宽：内容 375×667 居中，左右各 62.5px 黑边。
+        approx(
+            content_point(250.0, 333.5, 500.0, 667.0, SE3).unwrap(),
+            (187.5, 333.5),
+        );
+        approx(
+            content_point(62.5, 0.0, 500.0, 667.0, SE3).unwrap(),
+            (0.0, 0.0),
+        );
+        // 左右黑边上的点不转发。
+        assert!(content_point(10.0, 333.5, 500.0, 667.0, SE3).is_none());
+        assert!(content_point(490.0, 333.5, 500.0, 667.0, SE3).is_none());
+    }
+
+    #[test]
+    fn tap_accounts_for_letterbox_bars_above_and_below() {
+        // 容器 375×867 比设备高：内容 375×667 居中，上下各 100px 黑边。
+        approx(
+            content_point(187.5, 433.5, 375.0, 867.0, SE3).unwrap(),
+            (187.5, 333.5),
+        );
+        approx(
+            content_point(0.0, 100.0, 375.0, 867.0, SE3).unwrap(),
+            (0.0, 0.0),
+        );
+        assert!(content_point(187.5, 50.0, 375.0, 867.0, SE3).is_none());
+        assert!(content_point(187.5, 820.0, 375.0, 867.0, SE3).is_none());
+    }
+
+    #[test]
+    fn tap_rejects_degenerate_containers_and_windows() {
+        assert!(content_point(1.0, 1.0, 0.0, 667.0, SE3).is_none());
+        assert!(content_point(1.0, 1.0, 375.0, 0.0, SE3).is_none());
+        assert!(content_point(
+            1.0,
+            1.0,
+            375.0,
+            667.0,
+            WindowSize {
+                width: 0,
+                height: 0
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn fps_is_the_frame_delta_over_the_elapsed_time() {
+        let start = Instant::now();
+        // 第一次没有上一帧快照：0，而不是把总帧数当帧率。
+        assert_eq!(diff_fps(None, 90, start, 0), 0);
+        assert_eq!(
+            diff_fps(Some((90, start)), 105, start + Duration::from_secs(1), 0),
+            15
+        );
+        // 半秒 8 帧 = 16 fps。
+        assert_eq!(
+            diff_fps(
+                Some((90, start)),
+                98,
+                start + Duration::from_millis(500),
+                15
+            ),
+            16
+        );
+        // 间隔过短：沿用上一次的值，不除以接近零的时间。
+        assert_eq!(
+            diff_fps(Some((90, start)), 91, start + Duration::from_millis(10), 15),
+            15
+        );
+        // 代理重启后帧数回退不能变成负数。
+        assert_eq!(
+            diff_fps(Some((90, start)), 3, start + Duration::from_secs(1), 15),
+            0
+        );
+    }
+
+    #[test]
+    fn status_dto_never_carries_diagnostics() {
+        let starting = ios_status_dto(&IosSessionStatus::Starting);
+        assert_eq!(starting.state, "starting");
+        assert_eq!(starting.proxy_port, None);
+
+        let running = ios_status_dto(&IosSessionStatus::Running { proxy_port: 51234 });
+        assert_eq!(running.state, "running");
+        assert_eq!(running.proxy_port, Some(51234));
+        assert_eq!(running.locked, None);
+        assert_eq!(running.window, None);
+
+        assert_eq!(
+            ios_status_dto(&IosSessionStatus::Stopping).state,
+            "stopping"
+        );
+
+        let exited = ios_status_dto(&IosSessionStatus::Exited {
+            reason: ExitReason::UpstreamClosed,
+        });
+        assert_eq!(exited.state, "exited");
+        assert_eq!(exited.exit_reason.as_deref(), Some("upstream_closed"));
+        assert_eq!(exited.code, None);
+
+        let failed = ios_status_dto(&IosSessionStatus::Failed {
+            code: "wda_unreachable",
+        });
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.code.as_deref(), Some("wda_unreachable"));
+    }
+
+    /// DTO 序列化里**不能**出现 stderr 尾部或 UDID：iOS 子进程的 stderr 带着
+    /// 设备标识与 bundle id（方案 §二红线）。这条测试守的是字段表本身。
+    #[test]
+    fn status_dto_serializes_only_the_allowed_fields() {
+        let json = serde_json::to_string(&super::IosStatusDto {
+            state: "running".into(),
+            code: None,
+            exit_reason: None,
+            proxy_port: Some(51234),
+            fps: 15,
+            locked: Some(false),
+            window: Some(WindowDto {
+                width: 375,
+                height: 667,
+            }),
+        })
+        .unwrap();
+        assert!(!json.contains("stderr"), "{json}");
+        assert!(!json.contains("udid"), "{json}");
+        assert!(json.contains("\"proxy_port\":51234"), "{json}");
+    }
+
+    #[test]
+    fn screenshot_file_name_carries_a_sortable_timestamp() {
+        let at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 14, 8, 5, 3)
+            .unwrap();
+        let path = screenshot_path(at).unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "QuadControl-20260914-080503.png"
         );
     }
 
@@ -815,6 +1361,11 @@ pub fn run() {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         })
+        .manage(IosSessionStore {
+            session: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+            meta: Mutex::new(IosMeta::default()),
+        })
         .manage(PairingStore {
             state: Mutex::new(PairingState::Idle),
             cancel: Mutex::new(None),
@@ -829,7 +1380,19 @@ pub fn run() {
             pair_manual,
             start_session,
             stop_session,
-            sessions
+            sessions,
+            host_platform,
+            ios_dev_wda_enabled,
+            start_ios_session,
+            stop_ios_session,
+            ios_session_status,
+            ios_tap,
+            ios_send_text,
+            ios_home,
+            ios_wake,
+            ios_screenshot,
+            iphone_mirroring_available,
+            open_iphone_mirroring
         ]);
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
@@ -890,7 +1453,33 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
                     Vec::new()
                 }
             };
-            let report = quadcontrol_android::shutdown_all(&handles, SHUTDOWN_DEADLINE);
+            let ios_store = worker.state::<IosSessionStore>();
+            let ios_handles = match ios_store.session.lock() {
+                Ok(mut session) => session.take().into_iter().collect::<Vec<_>>(),
+                Err(_) => {
+                    eprintln!("iOS session store is poisoned during shutdown");
+                    Vec::new()
+                }
+            };
+            // 两条链路**先全部下停止请求**，再共用同一个截止点依次等 done：
+            // 串行相加会是 7 + 7 秒，而两边的终止梯子本来就该并行跑完。
+            for handle in &handles {
+                let _ = handle.request_stop();
+            }
+            for handle in &ios_handles {
+                let _ = handle.request_stop();
+            }
+            // 两个预算目前都是 7 秒；取大的那个，常量哪天分叉了也不会有人被截断。
+            let deadline_at = Instant::now() + SHUTDOWN_DEADLINE.max(IOS_SHUTDOWN_DEADLINE);
+            let android_report = quadcontrol_android::shutdown_all(
+                &handles,
+                deadline_at.saturating_duration_since(Instant::now()),
+            );
+            let ios_report = quadcontrol_ios::session::shutdown_all(
+                &ios_handles,
+                deadline_at.saturating_duration_since(Instant::now()),
+            );
+            let timed_out = android_report.timed_out.len() + ios_report.timed_out.len();
 
             // 配对用自己的预算（> 单次 adb 命令超时），不与会话预算共用。
             while cancelled_at.elapsed() < wireless::PAIRING_SHUTDOWN_DEADLINE {
@@ -912,14 +1501,13 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
             {
                 eprintln!("pairing worker did not finish before exit");
             }
-            Some(report)
+            Some(timed_out)
         })
         .await;
         match result {
-            Ok(Some(report)) if !report.timed_out.is_empty() => eprintln!(
-                "session shutdown timed out for {} session(s)",
-                report.timed_out.len()
-            ),
+            Ok(Some(timed_out)) if timed_out > 0 => {
+                eprintln!("session shutdown timed out for {timed_out} session(s)")
+            }
             Err(error) => eprintln!("shutdown worker failed: {error}"),
             _ => {}
         }
