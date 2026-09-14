@@ -1,4 +1,4 @@
-# 三平台统一控制端 GUI 方案（终稿；sol 两轮评审通过，栈 = Tauri v2 用户拍板）
+# 三平台统一控制端 GUI 方案（终稿；2026-08 经两轮独立评审通过，栈 = Tauri v2 用户拍板）
 
 ## 地基事实
 1. Android 象限的视频窗口归 scrcpy（SDL 自渲染）；GUI 是指挥台：发现→配对→启动→会话管理，不渲染 Android 视频。
@@ -19,7 +19,7 @@
 - 退出序列：拦截 exit → 广播 stop → **有界等待，期限由库统一暴露且大于终止梯子总时长**（Unix 梯 3s+2s → 等待 ≥7s），超时强制回收（kill + reap）并记录 → 退出。
 - Windows：**G2 引入 Job Object（kill-on-close）保证进程树回收**——GUI「一键断开」是安全边界宣称，硬杀降级契约不足以支撑。CLI 有 console 路径维持现状。
 
-## 切片（每片完整回路：sol 方案确认→luna→Fable 复核冒烟→sol 代码审→CI→合并）
+## 切片（每片完整回路：Fable 规划与方案评审→Opus 子代理实现→Fable 读 diff、亲修、跑测试→Fable 对抗性复审→CI→合并，分级见 CLAUDE.md）
 - **G0 风险切片（✅ 已关闭，2026-08-10；未触发 Slint 止损）**：实测数据与边界见
   [MASTER_PLAN.md](MASTER_PLAN.md) 的 P0.2——中文渲染通过；MJPEG 14.55fps/5 分钟、
   背压 0、RSS +0.55%；MJPEG 源为合成流，WDA 真流复测归 G4/P4。
