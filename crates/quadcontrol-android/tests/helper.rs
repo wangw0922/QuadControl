@@ -20,6 +20,7 @@ fn options(mode: &str) -> LaunchOptions {
         serial: "REDACTEDSERIAL".into(),
         bit_rate: "8M".into(),
         screen_off: false,
+        audio_on_computer: true,
         passthrough: Vec::new(),
         scrcpy_env: helper_env(mode),
     }

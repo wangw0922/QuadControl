@@ -20,7 +20,10 @@
 - Windows：**G2 引入 Job Object（kill-on-close）保证进程树回收**——GUI「一键断开」是安全边界宣称，硬杀降级契约不足以支撑。CLI 有 console 路径维持现状。
 
 ## 切片（每片完整回路：sol 方案确认→luna→Fable 复核冒烟→sol 代码审→CI→合并）
-- **G0 风险切片**：Tauri 空壳三平台 CI 构建 + **Linux 基线 Ubuntu 22.04 LTS 实跑**。运行时验证在本机 UTM 虚拟机（**arm64**，22.04 无官方 arm64 桌面 ISO → server ISO + `ubuntu-desktop` 包；用户 2026-08-08 拍板 VM 路线）；x86_64 由 CI 构建覆盖（Wayland 与 X11、中文字体、真 WDA MJPEG + CSP 均在 VM 实跑）。通过阈值：窗口正常渲染中文、MJPEG ≥10fps 持续 5 分钟无泄漏。**触发 Slint 的失败**：WebKitGTK 无法在基线发行版渲染窗口/崩溃、MJPEG 无法达标；**不触发**：打包脚本、字体配置类可修复问题。
+- **G0 风险切片（✅ 已关闭，2026-08-10；未触发 Slint 止损）**：实测数据与边界见
+  [MASTER_PLAN.md](MASTER_PLAN.md) 的 P0.2——中文渲染通过；MJPEG 14.55fps/5 分钟、
+  背压 0、RSS +0.55%；MJPEG 源为合成流，WDA 真流复测归 G4/P4。
+  原始计划如下：Tauri 空壳三平台 CI 构建 + **Linux 基线 Ubuntu 22.04 LTS 实跑**。运行时验证在本机 UTM 虚拟机（**arm64**，22.04 无官方 arm64 桌面 ISO → server ISO + `ubuntu-desktop` 包；用户 2026-08-08 拍板 VM 路线）；x86_64 由 CI 构建覆盖（Wayland 与 X11、中文字体、真 WDA MJPEG + CSP 均在 VM 实跑）。通过阈值：窗口正常渲染中文、MJPEG ≥10fps 持续 5 分钟无泄漏。**触发 Slint 的失败**：WebKitGTK 无法在基线发行版渲染窗口/崩溃、MJPEG 无法达标；**不触发**：打包脚本、字体配置类可修复问题。
 - **G1 设备列表**：adb（probe 解析）+ `ios list` 双列，状态徽章，双语。
 - **G1.5 会话监督库 PR**：上述所有权模型 + 测试。
 - **G2 Android 一键会话**：起停按钮、状态卡（运行/退出码/stderr 尾）、熄屏与码率选项；**Windows Job Object + Windows 真机无孤儿与 forward 清理进合并门禁**；macOS 真机验收。

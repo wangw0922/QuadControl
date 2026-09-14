@@ -8,6 +8,8 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,9 +19,36 @@ pub const PASSWORD_LENGTH: usize = 12;
 pub const ROUND_TIMEOUT: Duration = Duration::from_secs(300);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// 取消配对后等待 worker 回收的预算。**必须大于 `COMMAND_TIMEOUT`**：取消只能在
+/// 外围轮询点生效，worker 可能正卡在一次最长 10 秒的 adb 调用里；预算比它短，就等于
+/// 到点直接退出、把 adb 子进程留在身后。会话那条链路走自己的 `SHUTDOWN_DEADLINE`
+/// （由终止梯子决定），两者不能共用同一份预算。
+pub const PAIRING_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(COMMAND_TIMEOUT.as_secs() + 3);
 const ALPHANUMERIC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Cooperative cancellation for GUI-owned pairing work. The Arc is kept
+/// private so callers can only observe or request cancellation through this
+/// small, cloneable handle.
+#[derive(Clone, Debug, Default)]
+pub struct PairCancel(Arc<AtomicBool>);
+
+impl PairCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// 不派生 `Debug`：派生版会把 password 原样打印，任何一处 `{:?}`（含 panic 消息、
+/// 日志、`dbg!`）都会泄漏配对密钥。手写脱敏实现。
+/// 也不派生 `Clone`：副本会绕开「round-close 时显式 wipe 一次」的纪律，
+/// 留下未擦除的密钥拷贝。
+#[derive(Eq, PartialEq)]
 pub struct PairingSecret {
     pub service_name: String,
     pub password: String,
@@ -39,6 +68,17 @@ impl PairingSecret {
 impl Drop for PairingSecret {
     fn drop(&mut self) {
         self.wipe();
+    }
+}
+
+impl fmt::Debug for PairingSecret {
+    /// 只暴露服务名（它本来就在 mDNS 上广播），密码与整条 payload 一律脱敏。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingSecret")
+            .field("service_name", &self.service_name)
+            .field("password", &"<redacted>")
+            .field("payload", &"<redacted>")
+            .finish()
     }
 }
 
@@ -428,6 +468,16 @@ pub fn run_pairing_round(
     round: &mut RoundState,
     pairs: &mut Vec<PairProcess>,
 ) -> (RoundEvent, Result<String, WirelessError>) {
+    run_pairing_round_with_cancel(adb, secret, round, pairs, &PairCancel::new())
+}
+
+pub fn run_pairing_round_with_cancel(
+    adb: &Path,
+    secret: &PairingSecret,
+    round: &mut RoundState,
+    pairs: &mut Vec<PairProcess>,
+    cancel: &PairCancel,
+) -> (RoundEvent, Result<String, WirelessError>) {
     let round_id = round.id;
     let deadline = Instant::now() + ROUND_TIMEOUT;
     let mut spawned: Vec<String> = Vec::new();
@@ -437,7 +487,7 @@ pub fn run_pairing_round(
     let mut failure: Option<WirelessError> = None;
     let mut pair_timed_out = false;
     loop {
-        if crate::signal_requested() {
+        if cancel.is_cancelled() || crate::signal_requested() {
             return (RoundEvent::Cancelled, Err(WirelessError::Cancelled));
         }
         if Instant::now() >= deadline {
@@ -560,6 +610,7 @@ pub fn pair_qr_command(
     adb: &Path,
     announce: impl FnOnce(&str),
 ) -> Result<(String, usize, CloseReason), WirelessError> {
+    crate::install_signal_handlers();
     pair_qr_command_with_secret(adb, generate_pairing_secret(), announce)
 }
 
@@ -570,10 +621,17 @@ pub fn pair_qr_command_with_secret(
     secret: PairingSecret,
     announce: impl FnOnce(&str),
 ) -> Result<(String, usize, CloseReason), WirelessError> {
-    let _ = check_adb(adb)?;
-    // 信号必须在起任何子进程之前装好，否则 Ctrl-C 会跳过 round-close，
-    // 在设备上留下孤儿 adb —— 8 月 7 日的孤儿 screenrecord 就是这么来的。
     crate::install_signal_handlers();
+    pair_qr_command_with_cancel(adb, secret, announce, &PairCancel::new())
+}
+
+pub fn pair_qr_command_with_cancel(
+    adb: &Path,
+    secret: PairingSecret,
+    announce: impl FnOnce(&str),
+    cancel: &PairCancel,
+) -> Result<(String, usize, CloseReason), WirelessError> {
+    let _ = check_adb(adb)?;
 
     let mut secret = secret;
     let mut round = RoundState::new(1);
@@ -595,7 +653,8 @@ pub fn pair_qr_command_with_secret(
         }
     }
     announce(&qr);
-    let (event, outcome) = run_pairing_round(adb, &secret, &mut round, &mut pairs);
+    let (event, outcome) =
+        run_pairing_round_with_cancel(adb, &secret, &mut round, &mut pairs, cancel);
     // 唯一出口：成功、失败、取消、超时都从这里关闭轮次。
     let (reason, closed) = round_close(&mut round, &mut pairs, &mut secret, &mut qr, event);
     let guid = match (outcome, closed) {
@@ -611,25 +670,91 @@ pub fn pair_qr_command_with_secret(
     };
 
     // secret 与 QR 到此已擦除，后续步骤不再需要它们。
+    if cancel.is_cancelled() {
+        let _ = round_close(
+            &mut round,
+            &mut pairs,
+            &mut secret,
+            &mut qr,
+            RoundEvent::Cancelled,
+        );
+        return Err(WirelessError::Cancelled);
+    }
     let deadline = Instant::now() + ROUND_TIMEOUT;
-    let serial = match wait_for_guid(
+    let serial = match wait_for_guid_with_cancel(
         adb,
         &guid,
         deadline.saturating_duration_since(Instant::now()),
+        cancel,
     ) {
         Ok(serial) => serial,
-        Err(_) => {
+        Err(_) if !cancel.is_cancelled() => {
             let services = adb_mdns_services(adb)?;
             let service = connect_service_for_guid(&services, &guid)
                 .ok_or(WirelessError::NoMatchingService)?;
+            if cancel.is_cancelled() {
+                let _ = round_close(
+                    &mut round,
+                    &mut pairs,
+                    &mut secret,
+                    &mut qr,
+                    RoundEvent::Cancelled,
+                );
+                return Err(WirelessError::Cancelled);
+            }
             connect(adb, &format!("{}:{}", service.address, service.port))?;
-            wait_for_guid(
+            if cancel.is_cancelled() {
+                let _ = round_close(
+                    &mut round,
+                    &mut pairs,
+                    &mut secret,
+                    &mut qr,
+                    RoundEvent::Cancelled,
+                );
+                return Err(WirelessError::Cancelled);
+            }
+            match wait_for_guid_with_cancel(
                 adb,
                 &guid,
                 deadline.saturating_duration_since(Instant::now()),
-            )?
+                cancel,
+            ) {
+                Ok(serial) => serial,
+                Err(error) if cancel.is_cancelled() => {
+                    let _ = round_close(
+                        &mut round,
+                        &mut pairs,
+                        &mut secret,
+                        &mut qr,
+                        RoundEvent::Cancelled,
+                    );
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
         }
+        Err(error) if cancel.is_cancelled() => {
+            let _ = round_close(
+                &mut round,
+                &mut pairs,
+                &mut secret,
+                &mut qr,
+                RoundEvent::Cancelled,
+            );
+            return Err(error);
+        }
+        Err(error) => return Err(error),
     };
+    if cancel.is_cancelled() {
+        let _ = round_close(
+            &mut round,
+            &mut pairs,
+            &mut secret,
+            &mut qr,
+            RoundEvent::Cancelled,
+        );
+        return Err(WirelessError::Cancelled);
+    }
     let listed = crate::devices(adb).map_err(|error| WirelessError::Devices(error.to_string()))?;
     let visible = deduplicate_devices(&listed, &identity_pairs(adb, &listed));
     // 把结束原因带出去：测试据此守护 round-close 接线——删掉那次调用就拿不到它。
@@ -978,8 +1103,20 @@ pub fn connect(adb: &Path, endpoint: &str) -> Result<(), WirelessError> {
 }
 
 pub fn wait_for_guid(adb: &Path, guid: &str, timeout: Duration) -> Result<String, WirelessError> {
+    wait_for_guid_with_cancel(adb, guid, timeout, &PairCancel::new())
+}
+
+pub fn wait_for_guid_with_cancel(
+    adb: &Path,
+    guid: &str,
+    timeout: Duration,
+    cancel: &PairCancel,
+) -> Result<String, WirelessError> {
     let started = Instant::now();
     while started.elapsed() < timeout {
+        if cancel.is_cancelled() || crate::signal_requested() {
+            return Err(WirelessError::Cancelled);
+        }
         let (status, stdout, stderr) = run_adb(adb, &["devices", "-l"])?;
         if status != 0 {
             return Err(WirelessError::CommandFailed(stderr));
@@ -1010,28 +1147,43 @@ pub fn render_qr(payload: &str) -> Result<String, WirelessError> {
     const DARK: &str = "\x1b[40m  ";
     const LIGHT: &str = "\x1b[47m  ";
     const RESET: &str = "\x1b[0m";
-    const QUIET: usize = 4;
-
-    let code = qrcode::QrCode::new(payload.as_bytes())
-        .map_err(|error| WirelessError::InvalidInput(error.to_string()))?;
-    let modules = code.to_colors();
-    let width = code.width();
-    let side = width + QUIET * 2;
+    let matrix = qr_matrix(payload)?;
+    let side = matrix.side;
 
     let mut out = String::new();
     for y in 0..side {
         for x in 0..side {
-            let dark = y >= QUIET
-                && y < QUIET + width
-                && x >= QUIET
-                && x < QUIET + width
-                && modules[(y - QUIET) * width + (x - QUIET)] == qrcode::Color::Dark;
+            let dark = matrix.modules[y * side + x];
             out.push_str(if dark { DARK } else { LIGHT });
         }
         out.push_str(RESET);
         out.push('\n');
     }
     Ok(out)
+}
+
+pub struct QrMatrix {
+    pub side: usize,
+    pub modules: Vec<bool>,
+}
+
+/// The matrix is an equivalent encoding of the password and is equally
+/// sensitive as the payload. It avoids accidental plaintext copying/logging;
+/// it does not redact or otherwise anonymize the secret.
+pub fn qr_matrix(payload: &str) -> Result<QrMatrix, WirelessError> {
+    const QUIET: usize = 4;
+    let code = qrcode::QrCode::new(payload.as_bytes())
+        .map_err(|error| WirelessError::InvalidInput(error.to_string()))?;
+    let width = code.width();
+    let side = width + QUIET * 2;
+    let colors = code.to_colors();
+    let mut modules = vec![false; side * side];
+    for y in 0..width {
+        for x in 0..width {
+            modules[(y + QUIET) * side + x + QUIET] = colors[y * width + x] == qrcode::Color::Dark;
+        }
+    }
+    Ok(QrMatrix { side, modules })
 }
 
 pub fn pairing_instructions() -> &'static str {
@@ -1050,6 +1202,26 @@ pub fn adb_mdns_services(adb: &Path) -> Result<Vec<MdnsService>, WirelessError> 
 mod tests {
     use super::*;
     use adb_probe::Transport;
+
+    /// 钉住脱敏：任何人把 `#[derive(Debug)]` 加回 `PairingSecret`，这条就红。
+    /// 配对密钥出现在日志或 panic 消息里是安全事故，不是体验问题。
+    #[test]
+    fn debug_never_reveals_the_password() {
+        let secret = generate_pairing_secret();
+        let rendered = format!("{secret:?}");
+        assert!(
+            !rendered.contains(&secret.password),
+            "Debug 输出泄漏了配对密钥"
+        );
+        assert!(
+            !rendered.contains(&secret.payload),
+            "Debug 输出泄漏了 payload"
+        );
+        assert!(rendered.contains("<redacted>"));
+        // 服务名本来就在 mDNS 上广播，保留它便于排查。
+        assert!(rendered.contains(&secret.service_name));
+    }
+
     #[test]
     fn payload_shape_and_charset() {
         let s = generate_pairing_secret();
@@ -1136,6 +1308,69 @@ mod tests {
         assert_eq!(decoded, payload, "扫出来的内容必须与 payload 逐字节一致");
         assert!(decoded.starts_with("WIFI:T:ADB;S:studio-"));
     }
+
+    #[test]
+    fn qr_matrix_has_quiet_zone_and_matches_rendered_modules() {
+        let payload = generate_pairing_secret().payload.clone();
+        let matrix = qr_matrix(&payload).unwrap();
+        assert_eq!(matrix.modules.len(), matrix.side * matrix.side);
+        assert!(matrix.modules[..4 * matrix.side]
+            .iter()
+            .all(|module| !module));
+        assert!(matrix.modules.iter().enumerate().all(|(index, module)| {
+            let y = index / matrix.side;
+            let x = index % matrix.side;
+            if x < 4 || y < 4 || x >= matrix.side - 4 || y >= matrix.side - 4 {
+                !*module
+            } else {
+                true
+            }
+        }));
+        let rendered = render_qr(&payload).unwrap();
+        let dark_count = rendered.matches("\x1b[40m").count();
+        assert_eq!(
+            dark_count,
+            matrix.modules.iter().filter(|module| **module).count()
+        );
+    }
+
+    #[test]
+    fn pairing_cancel_interrupts_scan_and_wait_paths() {
+        let cancel = PairCancel::new();
+        cancel.cancel();
+        let secret = generate_pairing_secret();
+        let mut round = RoundState::new(1);
+        let mut pairs = Vec::new();
+        let (event, result) = run_pairing_round_with_cancel(
+            Path::new("/nonexistent/quadcontrol-adb-does-not-exist"),
+            &secret,
+            &mut round,
+            &mut pairs,
+            &cancel,
+        );
+        assert_eq!(event, RoundEvent::Cancelled);
+        assert!(matches!(result, Err(WirelessError::Cancelled)));
+        assert!(matches!(
+            wait_for_guid_with_cancel(
+                Path::new("unused"),
+                "adb-A",
+                Duration::from_secs(1),
+                &cancel
+            ),
+            Err(WirelessError::Cancelled)
+        ));
+        let mut secret = generate_pairing_secret();
+        let mut qr = render_qr(&secret.payload).unwrap();
+        let (reason, closed) = round_close(
+            &mut round,
+            &mut pairs,
+            &mut secret,
+            &mut qr,
+            RoundEvent::Cancelled,
+        );
+        assert_eq!(reason, CloseReason::Cancelled);
+        assert!(closed.is_ok());
+    }
     #[test]
     fn parses_firmware_mdns_and_exact_match() {
         let services = parse_mdns_services("List of discovered mdns services\nstudio-ABCDEFGHIJ._adb-tls-pairing._tcp. 192.168.1.20:37145\nstudio-OTHER._adb-tls-pairing._tcp. 192.168.1.21 37146\nadb-AAAA-BBBB._adb-tls-connect._tcp. 192.168.1.20:40733");
@@ -1176,11 +1411,13 @@ mod tests {
         ));
         let a = Device {
             serial: "1.2.3.4:5555".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };
         let b = Device {
             serial: "adb-X".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };
@@ -1371,11 +1608,13 @@ adb-R5CT30ABCDE-xyz._adb-tls-connect._tcp. 192.168.1.20:5555";
     fn dedupe_merges_on_shared_identity_and_keeps_unknown_apart() {
         let ip = Device {
             serial: "192.168.1.20:5555".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };
         let guid = Device {
             serial: "adb-R5CT30ABCDE-xyz".into(),
+            model: None,
             state: DeviceState::Device,
             transport: Transport::Tcp,
         };

@@ -46,6 +46,8 @@
       <aside class="sidebar" aria-labelledby="device-list-title">
         <h2 id="device-list-title" class="section-label" data-i18n="myDevices"></h2>
         <nav id="device-list" class="device-list" data-i18n-aria-label="myDevices"></nav>
+        <p id="device-empty" class="device-empty" data-i18n="noDevices" hidden></p>
+        <p id="device-errors" class="device-errors" hidden></p>
         <button id="add-device" class="btn btn-secondary btn-block" type="button">
           <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-plus"></use></svg>
           <span data-i18n="addDevice"></span>
@@ -53,22 +55,23 @@
       </aside>
 
       <section class="session" aria-labelledby="session-device-name">
-        <header class="session-header">
+        <header id="session-header" class="session-header">
           <div class="session-identity">
             <h1 id="session-device-name"></h1>
             <span id="session-state" class="tag tag-accent-2"></span>
             <span id="session-connection" class="tag tag-neutral"></span>
           </div>
           <div class="session-actions">
-            <button id="show-mirror" class="btn btn-secondary" type="button">
+            <button id="show-mirror" class="btn btn-secondary" type="button" disabled data-i18n-title="futureVersion" data-i18n-aria-label="futureVersion">
               <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-monitor"></use></svg>
               <span data-i18n="showMirror"></span>
             </button>
-            <button id="disconnect" class="btn btn-disconnect" type="button" data-i18n="disconnect"></button>
+            <button id="session-action" class="btn btn-primary" type="button" data-i18n="startControl"></button>
           </div>
         </header>
 
-        <div class="session-content">
+        <p id="session-empty" class="session-empty" data-i18n="noDevices" hidden></p>
+        <div id="session-content" class="session-content">
           <section class="mirror-card card elev-sm" data-i18n-aria-label="mirrorDescription">
             <div class="phone-placeholder">
               <svg class="icon mirror-phone" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
@@ -77,6 +80,11 @@
           </section>
 
           <div class="control-column">
+            <section class="session-status-card card elev-sm" aria-live="polite">
+              <h2 data-i18n="sessionStatus"></h2>
+              <p id="session-status-detail"></p>
+              <pre id="session-stderr" hidden></pre>
+            </section>
             <section class="control-card card elev-sm" data-i18n-aria-label="sessionControls">
               <div class="control-row">
                 <svg class="icon control-icon" aria-hidden="true"><use href="#icon-volume-2"></use></svg>
@@ -120,7 +128,7 @@
                   <h2 data-i18n="captureScreen"></h2>
                   <p data-i18n="captureDescription"></p>
                 </div>
-                <button class="btn btn-secondary" type="button" data-i18n="capture"></button>
+                <button id="capture-screen" class="btn btn-secondary" type="button" disabled data-i18n="capture" data-i18n-title="futureVersion" data-i18n-aria-label="futureVersion"></button>
               </div>
             </section>
 
@@ -149,8 +157,8 @@
               <svg class="icon" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
               <span><strong data-i18n="androidName"></strong><small data-i18n="androidPairing"></small></span>
             </label>
-            <label class="type-option">
-              <input type="radio" name="device-type" value="iphone" />
+            <label class="type-option type-option-disabled">
+              <input type="radio" name="device-type" value="iphone" disabled />
               <svg class="icon" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
               <span><strong data-i18n="iphone"></strong><small data-i18n="iphonePairing"></small></span>
             </label>
@@ -164,8 +172,7 @@
           <h2 class="dialog-title" data-i18n="scanTitle"></h2>
           <div id="scan-view">
             <div class="scan-content">
-              <div class="qr-placeholder" role="img" data-i18n-aria-label="qrPlaceholder">
-                <svg class="icon qr-icon" aria-hidden="true"><use href="#icon-qr-code"></use></svg>
+              <div id="qr-code" class="qr-placeholder" role="img" data-i18n-aria-label="qrPlaceholder">
                 <span id="qr-countdown"></span>
               </div>
               <ol class="scan-instructions">
@@ -186,6 +193,7 @@
 
           <form id="manual-form" hidden>
             <p class="dialog-intro" data-i18n="manualDescription"></p>
+            <p id="manual-error" class="device-errors" hidden></p>
             <div class="manual-fields">
               <label class="field">
                 <span data-i18n="hostLabel"></span>

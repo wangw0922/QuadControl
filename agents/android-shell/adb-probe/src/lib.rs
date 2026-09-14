@@ -211,6 +211,7 @@ pub enum Transport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Device {
     pub serial: String,
+    pub model: Option<String>,
     pub state: DeviceState,
     pub transport: Transport,
 }
@@ -323,6 +324,12 @@ pub fn parse_devices(stdout: &str) -> Result<Vec<Device>, ProbeError> {
                 "unauthorized" => DeviceState::Unauthorized,
                 other => DeviceState::Other(other.to_owned()),
             };
+            let model = fields.iter().find_map(|field| {
+                field
+                    .strip_prefix("model:")
+                    .filter(|model| !model.is_empty())
+                    .map(|model| model.replace('_', " "))
+            });
             let transport = if serial.starts_with("emulator-") {
                 Transport::Emulator
             } else if is_network_serial(&serial) {
@@ -335,6 +342,7 @@ pub fn parse_devices(stdout: &str) -> Result<Vec<Device>, ProbeError> {
 
             Some(Device {
                 serial,
+                model,
                 state,
                 transport,
             })
@@ -657,6 +665,25 @@ mod tests {
         assert_eq!(devices[0].state, DeviceState::Device);
         assert_eq!(devices[0].transport, Transport::Usb);
         assert_eq!(devices[0].serial, "REDACTEDSERIAL");
+        assert_eq!(devices[0].model.as_deref(), Some("SM S9180"));
+    }
+
+    #[test]
+    fn parses_missing_empty_and_mixed_models() {
+        let devices = parse_devices(concat!(
+            "List of devices attached\n",
+            "REDACTEDSERIAL device model:Pixel_6 transport_id:1\n",
+            "REDACTEDSERIAL unauthorized transport_id:2\n",
+            "REDACTEDSERIAL offline model: transport_id:3\n",
+            "REDACTEDSERIAL device model:Galaxy_S24 transport_id:4\n",
+        ))
+        .unwrap();
+
+        assert_eq!(devices.len(), 4);
+        assert_eq!(devices[0].model.as_deref(), Some("Pixel 6"));
+        assert_eq!(devices[1].model, None);
+        assert_eq!(devices[2].model, None);
+        assert_eq!(devices[3].model.as_deref(), Some("Galaxy S24"));
     }
 
     /// The same handset before the user approved the USB-debugging prompt. Real
@@ -822,6 +849,7 @@ mod tests {
             adb_version: "1.0.41\npreview".to_owned(),
             devices: vec![Device {
                 serial: "quoted\"\\\u{0001}".to_owned(),
+                model: None,
                 state: DeviceState::Other("recovery\tmode".to_owned()),
                 transport: Transport::Unknown,
             }],

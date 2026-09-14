@@ -1,7 +1,7 @@
 use quadcontrol_android::wireless;
 use quadcontrol_android::{
-    devices, filtered_args, install_signal_handlers, resolve_adb, select_device, LaunchOptions,
-    Session, HELP,
+    devices, filtered_args, install_signal_handlers, resolve_adb, resolve_scrcpy, select_device,
+    LaunchOptions, Session, HELP,
 };
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let serial = take_value(&mut args, "--serial")?;
     let bit_rate = take_value(&mut args, "--bit-rate")?.unwrap_or_else(|| "8M".into());
     let screen_off = take_flag(&mut args, "--screen-off");
+    let audio_on_computer = !take_flag(&mut args, "--no-audio");
     // Reject bad passthrough before touching any device: an argument error should
     // not depend on what happens to be plugged in.
     filtered_args(&args)?;
@@ -31,10 +32,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selected = select_device(&devices(&adb)?, serial.as_deref())?;
     let session = Session::start(&LaunchOptions {
         adb,
-        scrcpy: PathBuf::from("scrcpy"),
+        scrcpy: resolve_scrcpy(None),
         serial: selected,
         bit_rate,
         screen_off,
+        audio_on_computer,
         passthrough: args,
         scrcpy_env: Vec::new(),
     })?;

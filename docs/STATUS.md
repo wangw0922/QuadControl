@@ -3,7 +3,7 @@
 The end-to-end roadmap from the current state to the finished product — system
 boundaries and per-step acceptance criteria — is [MASTER_PLAN.md](MASTER_PLAN.md).
 
-Updated 2026-08-08. Control directions are fixed — see
+Updated 2026-09-13. Control directions are fixed — see
 [control architecture](CONTROL_ARCHITECTURE.md): every desktop
 (Windows/macOS/Linux)→Android rides **scrcpy** as the engine;
 Windows/Linux→iPhone goes through go-ios and WebDriverAgent; macOS→iPhone uses
@@ -39,14 +39,37 @@ Apple's iPhone Mirroring rather than anything of ours.
   Windows/Linux real-device execution is not verified; macOS is the
   development host.
 
+## GUI: M1 "usable on one machine" reached in code, not yet on hardware
+
+- **Unified controller GUI** (Tauri v2, `crates/quadcontrol-gui`): G0 closed on
+  2026-08-10 (shell builds on all three platforms in CI; Linux runtime spike
+  passed on Ubuntu 22.04 arm64 — Chinese text renders, MJPEG held 14.55 fps
+  for 5 minutes with no leak; Slint fallback not triggered). Merged on
+  2026-09-13 (PR #24):
+  - **P1 device list on real data** — `adb devices -l` plus go-ios `ios list`,
+    status badges, 5-second polling, stable error codes translated in the UI.
+    The go-ios output shape is taken from its documentation, not verified on
+    hardware (no go-ios on the development host); P4 re-checks it.
+  - **P1.5 session supervision library** — `try_wait`, `SessionHandle`,
+    `spawn_supervised`, `shutdown_all` with a 7-second bounded budget; covered
+    by unit tests (normal stop, natural exit, idempotent stop, no orphan).
+  - **P2 one-click Android session** — start/stop, status card (running /
+    exit code / stderr tail on non-zero exit), sound and screen-off options,
+    exit interception with background cleanup. **Verified only with a fake
+    adb and fake scrcpy on the Linux VM**; the 20-round real-handset
+    acceptance in MASTER_PLAN P2 has not been run. Windows deliberately
+    refuses to start sessions until Job Object cleanup lands (P6).
+  - **P3 pairing wizard on real adb** — native Wireless-debugging QR payload,
+    backend-driven 300-second countdown, cancel token wired to every exit
+    path, manual pairing on the same state machine, pairing secret never
+    derives `Debug`/`Clone`. **Not yet verified end-to-end on a real handset**
+    through the GUI (the underlying `pair-qr` CLI path was).
+- Still missing on the desktop side: the iPhone panel (P4), Windows/Linux
+  real-device engine verification (P6), and packaging (P7). See
+  [MASTER_PLAN.md](MASTER_PLAN.md).
+
 ## Not started
 
-- **Unified controller GUI** on each desktop (Windows, macOS, Linux): device
-  discovery, pairing, engine launch/config/cleanup, iPhone-side integration.
-  Today macOS has a working self-built viewer plus raw scrcpy; nothing is
-  unified yet, and Windows/Linux have no client at all. G0 (empty shell +
-  three-platform CI) is in progress; the reviewed slice plan is
-  [GUI_PLAN.md](GUI_PLAN.md).
 - **scrcpy on Windows/Linux**: expected to work (officially supported), not
   yet verified by this project.
 - **go-ios on Windows/Linux**: same status — cross-platform by design,
