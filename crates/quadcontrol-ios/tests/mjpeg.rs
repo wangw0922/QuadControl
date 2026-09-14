@@ -4,46 +4,102 @@ use quadcontrol_ios::mjpeg::{Proxy, MAX_FRAME_BYTES};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const BOUNDARY: &str = "upstreamframe";
 
-/// 起一个合成上游：发 multipart 响应头，然后按 `frames` 吐帧。
+/// 真机 WDA 上游响应头的形状（iPhone SE 3 + WDA 16.12.8，已实测）。
 ///
-/// 返回端口和「上游被连接过几次」的计数器——「下游重连 3 次，上游只连一次」这条
-/// 断言就靠它。
+/// 三处和我们自己的合成上游不同，每一处都能把切帧写错：`HTTP/1.0` 而不是 1.1；
+/// **boundary 值本身带 `--`**（于是正文分隔行是 `--BoundaryString`，不是四个横线）；
+/// 段头首字母大小写混用（`Content-type` 而不是 `Content-Type`）。
+const REAL_DEVICE_BOUNDARY_VALUE: &str = "--BoundaryString";
+
+/// 读掉上游连接上的 HTTP 请求（请求行 + 头，直到空行），返回请求行。
+///
+/// 真机实测：对 WDA 的 MJPEG 端口**只连接不发请求，4 秒内 0 字节**；发出
+/// `GET / HTTP/1.1` 之后才立刻推流。所以合成上游也照这个规矩来——不然代理里
+/// 「忘了发请求」这个真机上必死的 bug，在测试里根本暴露不出来。
+fn read_upstream_request(stream: &TcpStream) -> Option<String> {
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).ok()? == 0 {
+        return None;
+    }
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) if line.trim().is_empty() => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Some(request_line.trim_end().to_owned())
+}
+
+/// 起一个合成上游：**先等下游发来请求**，再发 multipart 响应头并按 `frames` 吐帧。
+///
+/// 返回端口、「上游被连接过几次」的计数器（「下游重连 3 次，上游只连一次」这条
+/// 断言靠它）、以及收到的请求行（证明代理确实发了请求，而不是连上就读）。
 fn synthetic_upstream(
     frames: Vec<Vec<u8>>,
     repeat: bool,
     with_content_length: bool,
-) -> (u16, Arc<AtomicU64>) {
+) -> (u16, Arc<AtomicU64>, Arc<Mutex<Vec<String>>>) {
+    synthetic_upstream_shaped(frames, repeat, with_content_length, BOUNDARY, false)
+}
+
+/// [`synthetic_upstream`] 的可调形状版：boundary 值与段头大小写都能指定。
+fn synthetic_upstream_shaped(
+    frames: Vec<Vec<u8>>,
+    repeat: bool,
+    with_content_length: bool,
+    boundary_value: &'static str,
+    lowercase_part_header: bool,
+) -> (u16, Arc<AtomicU64>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let connections = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&connections);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    // 正文分隔行永远是「`--` + 去掉前导 `--` 的 boundary 值」。
+    let separator = format!("--{}", boundary_value.trim_start_matches("--"));
 
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { return };
             counter.fetch_add(1, Ordering::SeqCst);
+            // 关键：不发请求就一个字节都不给，照 WDA 的真机行为。
+            let Some(request_line) = read_upstream_request(&stream) else {
+                continue;
+            };
+            seen.lock().unwrap().push(request_line);
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary={BOUNDARY}\r\n\r\n"
+                "HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary={boundary_value}\r\n\r\n"
             );
             if stream.write_all(head.as_bytes()).is_err() {
                 continue;
             }
+            let separator = separator.clone();
+            let content_type = if lowercase_part_header {
+                "Content-type"
+            } else {
+                "Content-Type"
+            };
             let frames = frames.clone();
             thread::spawn(move || loop {
                 for frame in &frames {
                     let part = if with_content_length {
                         format!(
-                            "--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                            "{separator}\r\n{content_type}: image/jpeg\r\nContent-Length: {}\r\n\r\n",
                             frame.len()
                         )
                     } else {
-                        format!("--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n\r\n")
+                        format!("{separator}\r\n{content_type}: image/jpeg\r\n\r\n")
                     };
                     if stream.write_all(part.as_bytes()).is_err()
                         || stream.write_all(frame).is_err()
@@ -60,7 +116,7 @@ fn synthetic_upstream(
             });
         }
     });
-    (port, connections)
+    (port, connections, requests)
 }
 
 /// 连上代理并读掉响应头，返回可继续读帧的 reader。
@@ -143,7 +199,7 @@ fn wait_for_frames(proxy: &Proxy, at_least: u64) {
 
 #[test]
 fn counts_frames_from_the_upstream() {
-    let (upstream, _) = synthetic_upstream(vec![vec![7u8; 512]; 3], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![7u8; 512]; 3], true, true);
     let proxy = Proxy::start(upstream).unwrap();
     wait_for_frames(&proxy, 5);
 
@@ -155,7 +211,7 @@ fn counts_frames_from_the_upstream() {
 #[test]
 fn frames_also_split_without_content_length() {
     // 没有 Content-Length 时要能扫到边界切帧。
-    let (upstream, _) = synthetic_upstream(vec![vec![3u8; 256]; 2], true, false);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![3u8; 256]; 2], true, false);
     let proxy = Proxy::start(upstream).unwrap();
     wait_for_frames(&proxy, 3);
     assert!(proxy.stats().frames >= 3);
@@ -163,7 +219,7 @@ fn frames_also_split_without_content_length() {
 
 #[test]
 fn downstream_receives_renderable_multipart_frames() {
-    let (upstream, _) = synthetic_upstream(vec![vec![9u8; 1024]], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![9u8; 1024]], true, true);
     let proxy = Proxy::start(upstream).unwrap();
     let mut reader = connect_downstream(proxy.local_port());
     for _ in 0..3 {
@@ -177,7 +233,7 @@ fn downstream_receives_renderable_multipart_frames() {
 /// 内核缓冲吸收，写方根本不阻塞，丢帧计数就恒零，用例会假通过。
 #[test]
 fn slow_downstream_drops_stale_frames() {
-    let (upstream, _) = synthetic_upstream(vec![vec![1u8; 256 * 1024]; 4], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![1u8; 256 * 1024]; 4], true, true);
     let proxy = Proxy::start(upstream).unwrap();
     // 连上但**几乎不读**，让下游写阻塞。
     let _slow = connect_downstream(proxy.local_port());
@@ -200,7 +256,7 @@ fn slow_downstream_drops_stale_frames() {
 /// 下游重连 3 次，帧仍持续，且**上游只被连过一次**。
 #[test]
 fn downstream_reconnects_keep_one_upstream_connection() {
-    let (upstream, connections) = synthetic_upstream(vec![vec![5u8; 2048]], true, true);
+    let (upstream, connections, _) = synthetic_upstream(vec![vec![5u8; 2048]], true, true);
     let proxy = Proxy::start(upstream).unwrap();
 
     for round in 0..3 {
@@ -223,7 +279,7 @@ fn downstream_reconnects_keep_one_upstream_connection() {
 /// 最新下游获胜：新连接到来后旧连接被关闭。
 #[test]
 fn newest_downstream_wins() {
-    let (upstream, _) = synthetic_upstream(vec![vec![4u8; 1024]], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![4u8; 1024]], true, true);
     let proxy = Proxy::start(upstream).unwrap();
 
     let mut first = connect_downstream(proxy.local_port());
@@ -268,7 +324,7 @@ fn drain_until_eof(reader: &mut BufReader<TcpStream>, budget: Duration, message:
 /// 就永远得不到画面。原来的用例都是连上立刻发 GET，恰好躲开了这个窗口。
 #[test]
 fn delayed_request_still_gets_a_response_head() {
-    let (upstream, _) = synthetic_upstream(vec![vec![7u8; 1024]], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![7u8; 1024]], true, true);
     let proxy = Proxy::start(upstream).unwrap();
 
     let mut stream = TcpStream::connect(("127.0.0.1", proxy.local_port())).unwrap();
@@ -295,7 +351,7 @@ fn delayed_request_still_gets_a_response_head() {
 /// 变成一次明确的失败。
 #[test]
 fn slow_downstream_does_not_wedge_the_proxy() {
-    let (upstream, _) = synthetic_upstream(vec![vec![1u8; 256 * 1024]; 4], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![1u8; 256 * 1024]; 4], true, true);
     let proxy = Proxy::start(upstream).unwrap();
 
     let mut stream = TcpStream::connect(("127.0.0.1", proxy.local_port())).unwrap();
@@ -327,7 +383,7 @@ fn slow_downstream_does_not_wedge_the_proxy() {
 /// 当然会在单槽里被覆盖，那是正常空转；照计会让这个指标在最常见的场景里虚高。
 #[test]
 fn no_downstream_means_no_backpressure_drops() {
-    let (upstream, _) = synthetic_upstream(vec![vec![2u8; 1024]; 4], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![2u8; 1024]; 4], true, true);
     let proxy = Proxy::start(upstream).unwrap();
 
     // 一个下游都不连，等上游吐足够多的帧（必然发生覆盖）。
@@ -343,7 +399,7 @@ fn no_downstream_means_no_backpressure_drops() {
 
 #[test]
 fn stop_closes_the_downstream_connection() {
-    let (upstream, _) = synthetic_upstream(vec![vec![6u8; 1024]], true, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![6u8; 1024]], true, true);
     let mut proxy = Proxy::start(upstream).unwrap();
     let mut reader = connect_downstream(proxy.local_port());
     assert_eq!(read_one_frame(&mut reader), 1024);
@@ -373,6 +429,51 @@ fn stop_closes_the_downstream_connection() {
     );
 }
 
+/// 代理必须**主动向上游发 HTTP 请求**，否则真机上一帧都拿不到。
+///
+/// 真机实测（iPhone SE 3 + WDA 16.12.8）：只连接不发请求，4 秒内 0 字节；发出
+/// `GET / HTTP/1.1` 后立刻推流。早先代理连上就开读，于是它向下游回了响应头却
+/// 永远没有帧，GUI 显示「已连接 · 0 帧/秒」。
+#[test]
+fn the_proxy_sends_a_request_before_reading_the_upstream() {
+    let (upstream, _, requests) = synthetic_upstream(vec![vec![7u8; 512]; 3], true, true);
+    let proxy = Proxy::start(upstream).unwrap();
+    // 合成上游在收到请求之前一个字节都不发，所以「有帧」本身就证明请求发出去了。
+    wait_for_frames(&proxy, 3);
+
+    let seen = requests.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "上游没有收到任何请求");
+    assert!(
+        seen.iter().all(|line| line.starts_with("GET ")),
+        "上游收到的不是 GET 请求：{seen:?}"
+    );
+}
+
+/// 真机上游的形状也要能正确切帧。
+///
+/// 三个真机细节一次测全：`HTTP/1.0`、boundary 值**自带 `--`**（正文分隔行是
+/// `--BoundaryString`，不是四个横线）、段头 `Content-type` 小写 t。
+#[test]
+fn real_device_upstream_shape_splits_frames() {
+    let (upstream, _, requests) = synthetic_upstream_shaped(
+        vec![vec![8u8; 1024]; 3],
+        true,
+        true,
+        REAL_DEVICE_BOUNDARY_VALUE,
+        true,
+    );
+    let proxy = Proxy::start(upstream).unwrap();
+    wait_for_frames(&proxy, 5);
+
+    assert!(proxy.is_alive(), "真机形状的上游把代理弄死了");
+    assert!(proxy.failure().is_none(), "{:?}", proxy.failure());
+    assert!(!requests.lock().unwrap().is_empty());
+
+    // 下游拿到的必须是一帧完整的、长度正确的 JPEG 段。
+    let mut reader = connect_downstream(proxy.local_port());
+    assert_eq!(read_one_frame(&mut reader), 1024);
+}
+
 /// 单帧超限：断流并报 `proxy_failed`。
 #[test]
 fn oversized_frame_tears_down_the_stream() {
@@ -380,6 +481,7 @@ fn oversized_frame_tears_down_the_stream() {
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        read_upstream_request(&stream).unwrap();
         let head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary={BOUNDARY}\r\n\r\n"
         );
@@ -409,7 +511,7 @@ fn oversized_frame_tears_down_the_stream() {
 /// 上游 EOF：链路死亡，代理自行收摊，下游连接随之关闭。
 #[test]
 fn upstream_eof_tears_down_the_proxy() {
-    let (upstream, _) = synthetic_upstream(vec![vec![2u8; 512]], false, true);
+    let (upstream, _, _) = synthetic_upstream(vec![vec![2u8; 512]], false, true);
     let proxy = Proxy::start(upstream).unwrap();
     wait_for_frames(&proxy, 1);
 

@@ -19,6 +19,14 @@ pub struct FakeWdaConfig {
     pub locked: bool,
     /// 收到 `/wda/unlock` 之后是否解锁。false = 模拟「设了密码，唤醒无效」。
     pub unlock_succeeds: bool,
+    /// `/wda/unlock` 是否直接回 500 且保持锁定。
+    ///
+    /// 这是**真机行为**：有密码的 iPhone 上该请求阻塞约 8 s 后返回 500
+    /// `Timed out while waiting until the screen is unlocked`，而屏幕其实已经亮了、
+    /// 停在密码页。`wake()` 必须把它判成 `device_locked`，而不是会话故障。
+    pub unlock_errors: bool,
+    /// `GET /element/active` 是否回 `nosuchelement`（设备上没有聚焦的输入框）。
+    pub no_active_element: bool,
     /// 属性回读返回的内容；None = 回读发出去的文本（正常情况）。
     pub read_back_override: Option<String>,
     /// `POST /session` 是否失败。
@@ -32,6 +40,8 @@ impl FakeWdaConfig {
         Self {
             locked: false,
             unlock_succeeds: true,
+            unlock_errors: false,
+            no_active_element: false,
             read_back_override: None,
             session_fails: false,
             window: (375, 667),
@@ -191,6 +201,14 @@ fn route(state: &State, method: &str, path: &str, body: &str) -> (bool, String) 
         return (true, format!(r#"{{"value":{locked}}}"#));
     }
     if path.ends_with("/wda/unlock") {
+        if state.config.unlock_errors {
+            // 照真机原文，包括 `unknown error` 这个 WDA 的笼统分类。锁定状态不变。
+            return (
+                false,
+                r#"{"value":{"error":"unknown error","message":"Timed out while waiting until the screen is unlocked"}}"#
+                    .to_owned(),
+            );
+        }
         if state.config.unlock_succeeds {
             state.locked.store(false, Ordering::SeqCst);
         }
@@ -200,6 +218,24 @@ fn route(state: &State, method: &str, path: &str, body: &str) -> (bool, String) 
         return (true, r#"{"value":null}"#.to_owned());
     }
     if path.ends_with("/element/active") {
+        // **只有 GET 被处理**。真机（WDA 16.12.8）上 POST 返回
+        // `unknown command / Unhandled endpoint`；替身照抄，这样一旦有人把
+        // `send_text` 改回 POST，用例立刻红。
+        if method != "GET" {
+            return (
+                false,
+                r#"{"value":{"error":"unknown command","message":"Unhandled endpoint"}}"#
+                    .to_owned(),
+            );
+        }
+        if state.config.no_active_element {
+            // 真机上没有聚焦输入框时的响应形状。
+            return (
+                false,
+                r#"{"value":{"error":"nosuchelement","message":"Unable to find an element with focus"}}"#
+                    .to_owned(),
+            );
+        }
         return (
             true,
             r#"{"value":{"element-6066-11e4-a52e-4f735466cecf":"E1"}}"#.to_owned(),

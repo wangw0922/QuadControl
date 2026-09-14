@@ -1,0 +1,9 @@
+[
+  {
+    "udid": "REDACTEDUDID",
+    "rsdPort": 50028,
+    "address": "fdxx::1",
+    "userspaceTun": true,
+    "userspaceTunPort": 60106
+  }
+]

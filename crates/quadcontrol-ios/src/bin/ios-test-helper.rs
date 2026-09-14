@@ -16,11 +16,14 @@
 //!   （梯子的最坏路径）。
 //! - `QUADCONTROL_FAKE_RUNWDA_STDERR`：`runwda` 立刻把它打到 stderr 并退出。
 //! - `QUADCONTROL_FAKE_FORWARD_<targetPort>`：该目标端口要转发到的本机上游端口。
+//! - `QUADCONTROL_FAKE_TUNNEL_DELAY_MS`：隧道注册进信息服务前的延迟（默认 300）。
+//! - `QUADCONTROL_FAKE_TUNNEL_NEVER=1`：隧道永不注册，用来测 `tunnel_failed`。
 //!
-//! `tunnel start` 还会**真的绑上** `--tunnel-info-port`：会话用「该端口是否被占」
-//! 作为隧道就绪判据，替身不绑就永远起不来（见 [`run_tunnel`]）。
+//! `tunnel start` 还会**真的绑上** `--tunnel-info-port` 并在上面跑一个最小的隧道
+//! 信息服务：会话的就绪判据是 `GET /tunnels` 里出现本机 UDID，替身只绑不应答的话
+//! Launch 模式就再也起不来了（见 [`run_tunnel`]）。
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
@@ -122,11 +125,14 @@ fn run_forever(name: &str) -> ! {
     }
 }
 
-/// `tunnel start`：**真的绑上** `--tunnel-info-port`，再长驻。
+/// `tunnel start`：绑上 `--tunnel-info-port` 并起一个最小隧道信息服务。
 ///
-/// 必须真绑：会话在起 runwda 之前会轮询「该端口是否已被占用」来判断隧道就绪。
-/// 替身若只是发呆，那个判据永远不成立，Launch 模式就再也起不来了——这也正是
-/// 「符号存在 ≠ 真的产生效果」在测试替身上的体现。
+/// 真 go-ios 1.2.1 在这个端口上**立刻**开 HTTP 服务，但设备隧道要再过约 1.1 s
+/// 才注册进去。会话的就绪判据是 `GET /tunnels` 里出现本机 UDID（见
+/// `session::await_tunnel`），所以替身必须把这个时间差如实模拟出来：
+/// `QUADCONTROL_FAKE_TUNNEL_DELAY_MS`（默认 300）之前返回 `[]`，之后返回含
+/// `--udid=` 参数值的数组；`QUADCONTROL_FAKE_TUNNEL_NEVER=1` 则永远返回 `[]`。
+/// 其它路径 404，和真 go-ios 的 `/` 一致。
 fn run_tunnel(args: &[String]) -> ! {
     maybe_ignore_signals();
     let port = args
@@ -134,18 +140,91 @@ fn run_tunnel(args: &[String]) -> ! {
         .find_map(|a| a.strip_prefix("--tunnel-info-port="))
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(0);
-    let _listener = match TcpListener::bind(("127.0.0.1", port)) {
+    let udid = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--udid="))
+        .unwrap_or("")
+        .to_owned();
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => listener,
         Err(error) => {
             eprintln!("ios-test-helper: tunnel could not bind {port}: {error}");
             std::process::exit(1);
         }
     };
-    // PID 在**绑定之后**才落盘：这样测试看到 PID 就意味着端口已经在听。
+    // PID 在**绑定之后、延迟开始之前**落盘：测试拿它的 mtime 当隧道起动时刻 t₀，
+    // 再和 runwda.pid 的 mtime 比，验证 runwda 确实等到了注册之后才起。
     write_pid("tunnel");
-    loop {
-        thread::sleep(Duration::from_millis(50));
+
+    let started = std::time::Instant::now();
+    let never = std::env::var("QUADCONTROL_FAKE_TUNNEL_NEVER").as_deref() == Ok("1");
+    let delay = Duration::from_millis(
+        std::env::var("QUADCONTROL_FAKE_TUNNEL_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300),
+    );
+
+    for incoming in listener.incoming() {
+        let Ok(stream) = incoming else { continue };
+        let udid = udid.clone();
+        thread::spawn(move || {
+            let registered = !never && started.elapsed() >= delay;
+            serve_tunnel_request(stream, &udid, registered);
+        });
     }
+    std::process::exit(0);
+}
+
+/// 处理一条隧道信息服务的连接：只认 `GET /tunnels`，其它一律 404。
+///
+/// 每条连接都带 `Connection: close` 并在写完后关掉：ureq 会复用连接池里的连接，
+/// 若替身把一条已经写完的连接挂着不关，客户端下一轮轮询可能卡在一条死连接上。
+fn serve_tunnel_request(mut stream: TcpStream, udid: &str, registered: bool) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(clone) => clone,
+        Err(_) => return,
+    });
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+        return;
+    }
+    // 读掉剩下的头，避免客户端还在写而我们已经关闭（RST）。
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) if line.trim().is_empty() => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
+    let is_tunnels = request_line.starts_with("GET /tunnels");
+    let body = if !is_tunnels {
+        "404 page not found\n".to_owned()
+    } else if registered {
+        // 形状照 `tests/fixtures/go-ios-1.2.1/tunnels.stdout.json`。
+        format!(
+            r#"[{{"udid":"{udid}","rsdPort":50028,"address":"fdxx::1","userspaceTun":true,"userspaceTunPort":60106}}]"#
+        )
+    } else {
+        "[]".to_owned()
+    };
+    let status = if is_tunnels {
+        "200 OK"
+    } else {
+        "404 Not Found"
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 /// `runwda`：可按环境变量立刻以指定 stderr 退出，用来测关键字分类。

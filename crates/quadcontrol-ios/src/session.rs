@@ -112,6 +112,11 @@ pub struct IosLaunchOptions {
     /// 28100，其它用例的正常启动就全被判成 `TunnelPortBusy`。默认值仍是
     /// [`DEFAULT_TUNNEL_INFO_PORT`]。
     pub tunnel_info_port: u16,
+    /// 等待设备隧道在隧道信息服务里**注册**的总预算；测试用短预算。
+    ///
+    /// 默认 [`TUNNEL_READY_BUDGET`]。做成字段是为了让「隧道永不注册」这条用例
+    /// 能在 2 s 内判负，而不是把测试挂 10 s。
+    pub tunnel_ready_budget: Duration,
     /// `/status` 就绪轮询的总预算；测试用短预算。
     pub status_budget: Duration,
 }
@@ -122,6 +127,7 @@ impl std::fmt::Debug for IosLaunchOptions {
             .field("udid", &self.udid_redacted())
             .field("mode", &self.mode)
             .field("tunnel_info_port", &self.tunnel_info_port)
+            .field("tunnel_ready_budget", &self.tunnel_ready_budget)
             .field("status_budget", &self.status_budget)
             .finish()
     }
@@ -134,6 +140,7 @@ impl IosLaunchOptions {
             udid: udid.into(),
             mode,
             tunnel_info_port: DEFAULT_TUNNEL_INFO_PORT,
+            tunnel_ready_budget: TUNNEL_READY_BUDGET,
             status_budget: DEFAULT_STATUS_BUDGET,
         }
     }
@@ -426,8 +433,8 @@ fn start_session(
             )?);
             // 隧道必须**先真的就绪**再起 runwda：iOS 17+ 的 runwda 要经隧道才能
             // 到达设备服务，抢跑会得到一个含糊的 runwda 失败，把真因（隧道没起来）
-            // 藏掉。判据是隧道信息端口被绑上——那正是启动前探测「是否被占」的同一个
-            // 端口，语义前后一致。
+            // 藏掉。就绪判据见 [`await_tunnel`]：是设备隧道在信息服务里**注册**，
+            // 而不是那个端口被绑上——真机上两者差着约 1.1 s。
             if await_tunnel(options, children, stop_rx)? == Readiness::StopRequested {
                 return Ok(ExitReason::Requested);
             }
@@ -437,6 +444,15 @@ fn start_session(
                 &[
                     "runwda".into(),
                     format!("--udid={}", options.udid),
+                    // 必须显式指定隧道：不带这个参数时 go-ios 会用它自己的跨进程
+                    // 发现机制去找「最近的」隧道代理。真机实测：宿主上另有一个
+                    // go-ios 隧道（哪怕在别的端口）时，`ios tunnel ls` 不带参数查的
+                    // 是 60105 而不是默认的 28100——它记住了别人的端口。结果是本
+                    // 会话的 runwda 挂在别人的隧道上，对方一退，我们就
+                    // `lost connection to testmanagerd`。`ios --help` 也写着
+                    // "per-device tunnel agent; run one per device on its own
+                    // --tunnel-info-port"。
+                    format!("--tunnel-info-port={}", options.tunnel_info_port),
                     format!("--bundleid={}", wda.bundle_id),
                     format!("--testrunnerbundleid={}", wda.testrunner_id),
                     format!("--xctestconfig={}", wda.xctestconfig),
@@ -502,6 +518,8 @@ fn spawn_forward(
             &[
                 "forward".into(),
                 format!("--udid={}", options.udid),
+                // 和 runwda 同一个理由：不指定就会连到宿主上别人的隧道代理。
+                format!("--tunnel-info-port={}", options.tunnel_info_port),
                 local.to_string(),
                 remote.to_string(),
             ],
@@ -612,25 +630,75 @@ fn set_parent_death_signal(_command: &mut Command) {}
 /// 借用 WDA 的预算会让错误码指错地方。
 pub const TUNNEL_READY_BUDGET: Duration = Duration::from_secs(10);
 
-/// 隧道信息端口上是否已经有人在监听。
+/// 隧道信息服务返回的一条隧道记录（`GET /tunnels`）。
 ///
-/// 用 connect 而不是 bind：见 [`await_tunnel`] 里的说明——bind 探测会把端口从
-/// 被等待的子进程手里抢走。连上就立刻断开，不发任何字节。
-fn tunnel_is_listening(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(200),
-    )
-    .is_ok()
+/// 真机样本（go-ios 1.2.1，iPhone SE 3）见
+/// `tests/fixtures/go-ios-1.2.1/tunnels.stdout.json`。除 `udid` 外的字段我们
+/// 当前都不用，但保留下来是有意的：解析时它们证明这确实是一条隧道记录，
+/// 将来要用 `rsd_port` 时也不必再改协议层。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+// 只有 `udid` 参与就绪判据；其余字段是**有意保留**的协议形状记录，由
+// `real_device_tunnels_fixture_parses` 钉住。真要用 `rsd_port` 时不必再改协议层。
+#[allow(dead_code)]
+struct TunnelInfo {
+    udid: String,
+    #[serde(default)]
+    rsd_port: Option<u16>,
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    userspace_tun: Option<bool>,
+    #[serde(default)]
+    userspace_tun_port: Option<u16>,
 }
 
-/// 有界等待隧道信息端口就绪；期间 tunnel 早退或收到停止请求都要立刻返回。
+/// 解析 `GET /tunnels` 的响应体。抽成纯函数是为了能用真机 fixture 做单测。
+fn parse_tunnels(body: &str) -> Result<Vec<TunnelInfo>, serde_json::Error> {
+    serde_json::from_str(body)
+}
+
+/// 隧道信息服务里是否已经**注册**了这台设备的隧道。
+///
+/// 任何失败（连不上、非 200、JSON 解析不了）都当「还没就绪」继续等：启动早期
+/// 这三种都会真的发生，把它们当硬错误会把一个正常的 1 秒等待判成故障。
+fn tunnel_is_registered(agent: &ureq::Agent, port: u16, udid: &str) -> bool {
+    let Ok(response) = agent
+        .get(&format!("http://127.0.0.1:{port}/tunnels"))
+        .call()
+    else {
+        return false;
+    };
+    let Ok(body) = response.into_string() else {
+        return false;
+    };
+    parse_tunnels(&body).is_ok_and(|tunnels| tunnels.iter().any(|tunnel| tunnel.udid == udid))
+}
+
+/// 有界等待**设备隧道注册完成**；期间 tunnel 早退或收到停止请求都要立刻返回。
+///
+/// # 为什么判据不是「端口通了」
+///
+/// iPhone SE 3 + go-ios 1.2.1 实测：`ios tunnel start --userspace --udid=U
+/// --tunnel-info-port=P` 一起来就**立刻**在 P 上开 HTTP 服务（日志
+/// `Tunnel server started`），但设备隧道要再过约 **1.1 s** 才
+/// `userspace tunnel negotiated`。旧判据只等端口可连，于是 runwda 抢跑，报
+/// `cannot create a tunnel connection to testmanagerd ... missing tunnel address
+/// and RSD port`，整条会话以 `wda_unreachable` 失败——真因（隧道还没好）被
+/// 完全藏掉了。
+///
+/// 正确判据是 `GET /tunnels` 的 JSON 数组里出现 `udid == options.udid` 的一项；
+/// 隧道建好前它是空数组 `[]`，`/` 则返回 404。
 fn await_tunnel(
     options: &IosLaunchOptions,
     children: &mut [SupervisedChild],
     stop_rx: &mpsc::Receiver<StopCommand>,
 ) -> Result<Readiness, Error> {
-    let deadline = Instant::now() + TUNNEL_READY_BUDGET;
+    // agent 建一次就够；每次请求 1 s 超时，免得服务半死时把整个预算堵在一次调用上。
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(1))
+        .build();
+    let deadline = Instant::now() + options.tunnel_ready_budget;
     loop {
         if stop_rx.try_recv().is_ok() {
             return Ok(Readiness::StopRequested);
@@ -638,19 +706,13 @@ fn await_tunnel(
         if let Some(error) = first_child_failure(children) {
             return Err(error);
         }
-        // 用**连接**探测，绝不能用 `port_is_free`（bind 探测）。
-        //
-        // bind 探测会真的把端口占下来再释放：它和被等待的 tunnel 子进程抢同一个端口，
-        // 正好在对方 bind 的瞬间偷走它，于是 tunnel 以 `Address already in use` 早退。
-        // 实测复现过（`ios-test-helper: tunnel could not bind 28205`）。
-        // connect 探测只读不写，不会干扰对方。
-        if tunnel_is_listening(options.tunnel_info_port) {
+        if tunnel_is_registered(&agent, options.tunnel_info_port, &options.udid) {
             return Ok(Readiness::Ready);
         }
         if Instant::now() >= deadline {
             return Err(Error::TunnelFailed(format!(
-                "`ios tunnel start` did not open its info port within {} s",
-                TUNNEL_READY_BUDGET.as_secs()
+                "device tunnel did not register within {} s",
+                options.tunnel_ready_budget.as_secs()
             )));
         }
         thread::sleep(Duration::from_millis(100));
@@ -921,6 +983,29 @@ mod tests {
             // 没有任何自由字符串字段能塞进 stderr 尾部。
             assert!(!rendered.to_lowercase().contains("stderr"), "{rendered}");
         }
+    }
+
+    /// 真机 fixture（go-ios 1.2.1）必须能解析出 UDID 与 RSD 端口。
+    #[test]
+    fn real_device_tunnels_fixture_parses() {
+        let body = include_str!("../tests/fixtures/go-ios-1.2.1/tunnels.stdout.json");
+        let tunnels = parse_tunnels(body).expect("真机 fixture 解析失败");
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].udid, "REDACTEDUDID");
+        assert_eq!(tunnels[0].rsd_port, Some(50028));
+        assert_eq!(tunnels[0].address.as_deref(), Some("fdxx::1"));
+        assert_eq!(tunnels[0].userspace_tun, Some(true));
+        assert_eq!(tunnels[0].userspace_tun_port, Some(60106));
+    }
+
+    /// 隧道建好前是空数组；别的设备的隧道不算数；404 正文当「未就绪」。
+    #[test]
+    fn empty_and_foreign_tunnels_are_not_ready() {
+        assert!(parse_tunnels("[]").unwrap().is_empty());
+        let others = parse_tunnels(r#"[{"udid":"REDACTEDUDID-OTHER","rsdPort":1}]"#).unwrap();
+        assert!(!others.iter().any(|t| t.udid == "REDACTEDUDID"));
+        // `/` 返回的 404 正文解析不了——必须当成「未就绪」继续等，而不是硬错误。
+        assert!(parse_tunnels("404 page not found").is_err());
     }
 
     /// 任何人把 `#[derive(Debug)]` 加回 `IosLaunchOptions`，这条就红。

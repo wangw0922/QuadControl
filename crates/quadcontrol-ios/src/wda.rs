@@ -20,6 +20,11 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// `delete_session` 的超时：退出序列里它只是礼貌性调用，不能拖慢关闭预算。
 pub const DELETE_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
+/// `wda/unlock` 的超时。
+///
+/// 必须远大于 [`REQUEST_TIMEOUT`]：真机实测有密码的设备上这个请求要**阻塞约 8 秒**
+/// 才返回 500。用 5 s 的默认超时会把它判成传输失败，进而误报成会话故障。
+pub const UNLOCK_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// 设备窗口尺寸，单位是**点**（不是像素）。真机 iPhone SE 3 是 375×667。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,13 +177,40 @@ impl Client {
     /// 所以做**有界**轮询（[`UNLOCK_SETTLE_BUDGET`]）；预算内仍锁定就报
     /// [`Error::DeviceLocked`]——那通常意味着设备有密码，需要用户介入。
     ///
-    /// 注意：本操作在真机上**未测量**（README 如实标注），真机验收时要补测并回写。
+    /// # 真机实测（iPhone SE 3 + WDA 16.12.8，有密码）
+    ///
+    /// `POST /wda/unlock` 会**阻塞约 8 秒**然后返回 HTTP 500：
+    /// `Error Domain=com.facebook.WebDriverAgent Code=1 "Timed out while waiting
+    /// until the screen is unlocked"`；此后 `/wda/locked` 仍为 true——屏幕已经点亮、
+    /// 停在密码页，这**正是**我们要的「唤醒屏幕」效果。
+    ///
+    /// 两条由此而来的设计：
+    /// 1. 这个请求单独用 [`UNLOCK_TIMEOUT`] 的 agent。用默认的 5 s
+    ///    [`REQUEST_TIMEOUT`] 会先以 ureq 超时失败，被映射成 `wda_session_failed`，
+    ///    界面显示成「无法建立会话」——对一台只是设了密码的手机来说是彻头彻尾的误报。
+    /// 2. 请求失败（HTTP 500 或超时）**不立即报错**，而是回头查一次
+    ///    [`Client::locked`]：仍锁定 → [`Error::DeviceLocked`]（预期结果，等用户
+    ///    自己解锁）；已解锁 → `Ok`。只有 `locked()` 本身也失败，才是真的
+    ///    [`Error::WdaSessionFailed`]。
     pub fn wake(&self) -> Result<(), Error> {
         if !self.locked()? {
             return Ok(());
         }
         let path = format!("/session/{}/wda/unlock", self.session()?);
-        self.post(&path, &serde_json::json!({}), Error::WdaSessionFailed)?;
+        // 单独的 agent：unlock 在有密码的设备上要阻塞约 8 s 才返回 500。
+        let agent = ureq::AgentBuilder::new().timeout(UNLOCK_TIMEOUT).build();
+        let unlock = agent
+            .post(&format!("{}{path}", self.base_url))
+            .send_json(serde_json::json!({}));
+        if unlock.is_err() {
+            // 失败不代表没效果：屏幕通常已经亮了，只是停在密码页。让 `locked()`
+            // 来裁决，而不是把一个预期内的 500 报成会话故障。
+            return if self.locked()? {
+                Err(Error::DeviceLocked)
+            } else {
+                Ok(())
+            };
+        }
 
         let deadline = std::time::Instant::now() + UNLOCK_SETTLE_BUDGET;
         loop {
@@ -208,9 +240,18 @@ impl Client {
 
     /// 向当前聚焦元素送文字，并**回读核验**。
     ///
-    /// 流程：`POST element/active` 取元素 → `POST element/{e}/value` 写入 →
+    /// 流程：`GET element/active` 取元素 → `POST element/{e}/value` 写入 →
     /// `GET element/{e}/attribute/value` 回读。回读不含发送内容就报
     /// [`Error::TextUnconfirmed`]，文案由 GUI 给（「无法确认已送达，请在手机上核对」）。
+    ///
+    /// **取元素必须用 GET。** 真机实测（WDA 16.12.8）：`POST
+    /// /session/{s}/element/active` 返回
+    /// `{"value":{"error":"unknown command","message":"Unhandled endpoint ..."}}`；
+    /// 只有 `GET` 被处理（无聚焦元素时返回 `nosuchelement` 错误）。
+    /// `agents/ios-wda/README.md` 里写的 POST 是旧版本 WDA 的行为。
+    ///
+    /// `nosuchelement` 映射成 [`Error::NoActiveElement`]，而不是笼统的会话故障：
+    /// 「手机上没有聚焦的输入框」是用户能自己修的状态，值得一句明确的提示。
     ///
     /// **绝不调用 `POST /wda/keys`。** 真机验证两次（无聚焦元素、以及光标可见键盘
     /// 弹起的正常聚焦状态）：它**返回成功而字符从不送达**。设备当时启用了简体中文
@@ -231,13 +272,16 @@ impl Client {
             return Err(Error::DeviceLocked);
         }
         let session = self.session()?;
-        let active = self.post(
-            &format!("/session/{session}/element/active"),
-            &serde_json::json!({}),
-            Error::WdaSessionFailed,
-        )?;
-        let element = element_id(&active)
-            .ok_or_else(|| Error::WdaSessionFailed("no active element on the device".into()))?;
+        // GET，不是 POST：见本函数的文档。WDA 对无聚焦元素回 `nosuchelement`，
+        // 那不是故障，是「请先点进一个输入框」。
+        let active = self.get(&format!("/session/{session}/element/active"), |message| {
+            if message.contains("nosuchelement") {
+                Error::NoActiveElement
+            } else {
+                Error::WdaSessionFailed(message)
+            }
+        })?;
+        let element = element_id(&active).ok_or(Error::NoActiveElement)?;
 
         self.post(
             &format!("/session/{session}/element/{element}/value"),

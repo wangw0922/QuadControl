@@ -18,8 +18,18 @@
 //! - 只保留「最新一帧」单槽缓冲：下游慢时覆盖旧帧并计 `backpressure_drops`。
 //!   这是评审阻塞项 B3 的裁决——无界队列会让 `backpressure_drops` 恒零，
 //!   而且把内存压力变成延迟累积。
-//! - **不解码 JPEG，不做黑帧检测。** 停帧不是锁屏信号（真机：锁屏后截图是合法
-//!   全黑 PNG、无错误），锁定提示只由 `/wda/locked` 驱动。
+//! - **不解码 JPEG，不做黑帧检测。** 停帧不是锁屏信号，锁定提示只由 `/wda/locked`
+//!   驱动。这一条现在是**实测结论**（iPhone SE 3 + WDA 16.12.8）：锁屏后 MJPEG
+//!   照常出帧（3 s 41 帧，每帧约 20 KB 全黑），`/screenshot` 返回 13 KB 的合法
+//!   全黑 PNG、不报错，点按也静默成功。也就是说「没有帧」和「锁屏了」之间没有
+//!   任何相关性，靠画面猜锁定状态一定会猜错。
+//! - 上游**必须先收到一条 HTTP 请求**才会推流，见 [`UPSTREAM_REQUEST`]。
+//!
+//! # 实测帧率基线
+//!
+//! iPhone SE 3（750×1334）、quality 50：单帧约 87 KB，3 秒 41 帧 ≈ 13.7 fps，
+//! 与设置的 [`crate::session::MJPEG_FPS`]（15）基本吻合。**限帧只在编码器侧做，
+//! 与设备刷新率无关**（红线）。
 
 use crate::Error;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -286,8 +296,23 @@ fn connect_upstream(port: u16, budget: Duration) -> Result<TcpStream, Error> {
     }
 }
 
+/// 连上上游后必须发的 HTTP 请求。
+///
+/// **真机实测（iPhone SE 3 + WDA 16.12.8）**：对 WDA 的 MJPEG 端口只连接、不发
+/// 请求，4 秒内收到 **0 字节**；发出下面这一行之后立刻开始推流。早先 `pump_upstream`
+/// 直接开读，于是代理向下游回了响应头却永远拿不到帧，GUI 上显示成
+/// 「已连接 · 0 帧/秒」——典型的「连上了 ≠ 真的产生效果」。
+const UPSTREAM_REQUEST: &str = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+
 /// 读上游、切帧、投进单槽。
 fn pump_upstream(stream: TcpStream, slot: &Arc<Slot>, failure: &Arc<Mutex<Option<String>>>) {
+    // 先发请求再读：不发的话上游一个字节都不会给（见 [`UPSTREAM_REQUEST`]）。
+    if let Err(error) = request_stream(&stream) {
+        *failure.lock().expect("failure mutex poisoned") = Some(error);
+        slot.stopping.store(true, Ordering::Release);
+        slot.ready.notify_all();
+        return;
+    }
     let mut reader = BufReader::new(stream);
     let boundary = match read_upstream_boundary(&mut reader) {
         Ok(boundary) => boundary,
@@ -321,7 +346,31 @@ fn pump_upstream(stream: TcpStream, slot: &Arc<Slot>, failure: &Arc<Mutex<Option
     }
 }
 
+/// 向上游发出 [`UPSTREAM_REQUEST`]；写失败按 `proxy_failed` 记录。
+fn request_stream(stream: &TcpStream) -> Result<(), String> {
+    let mut stream = stream
+        .try_clone()
+        .map_err(|error| format!("MJPEG upstream socket could not be cloned: {error}"))?;
+    stream
+        .write_all(UPSTREAM_REQUEST.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("MJPEG upstream did not accept the stream request: {error}"))
+}
+
 /// 读上游的 HTTP 响应头，取出 multipart 边界。
+///
+/// 真机上游响应的形状（WDA 16.12.8，已实测）：
+///
+/// ```text
+/// HTTP/1.0 200 OK
+/// Content-Type: multipart/x-mixed-replace; boundary=--BoundaryString
+/// ```
+///
+/// 注意 **boundary 值本身带 `--`**，正文分隔行也就是 `--BoundaryString`，不是四个
+/// 横线。下面的 `trim_start_matches("--")` 正是为它准备的：统一成不带 `--` 的形式，
+/// 切帧时由 [`read_frame`] 自己补一个 `--`。每段的头是
+/// `Content-type: image/jpeg` + `Content-Length: <n>`（真机首字母大小写混用，所以
+/// 头名比较一律 `eq_ignore_ascii_case`），JPEG 正文之后紧跟 `\r\n`。
 fn read_upstream_boundary(reader: &mut BufReader<TcpStream>) -> Result<String, String> {
     let mut content_type = None;
     loop {

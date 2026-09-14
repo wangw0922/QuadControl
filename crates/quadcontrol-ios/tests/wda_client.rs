@@ -60,9 +60,30 @@ fn tap_is_refused_while_locked() {
 fn send_text_succeeds_when_the_read_back_matches() {
     let (server, client) = connected(FakeWdaConfig::healthy());
     client.send_text("192.0.2.7").unwrap();
-    assert!(server.saw("POST /session/FAKESESSION/element/active"));
+    // 取聚焦元素必须是 **GET**：真机（WDA 16.12.8）上 POST 回
+    // `unknown command / Unhandled endpoint`，只有 GET 被处理。
+    assert!(server.saw("GET /session/FAKESESSION/element/active"));
+    assert!(!server.saw("POST /session/FAKESESSION/element/active"));
     assert!(server.saw("POST /session/FAKESESSION/element/E1/value"));
     assert!(server.saw("GET /session/FAKESESSION/element/E1/attribute/value"));
+}
+
+/// 设备上没有聚焦的输入框 → `no_active_element`，不是笼统的会话故障。
+///
+/// 真机（WDA 16.12.8）上 `GET /element/active` 此时回 `nosuchelement`。这是用户
+/// 自己就能修的状态（点进一个输入框），值得一个明确的码和一句明确的提示。
+#[test]
+fn send_text_reports_no_active_element_when_nothing_is_focused() {
+    let (_server, client) = connected(FakeWdaConfig {
+        no_active_element: true,
+        ..FakeWdaConfig::healthy()
+    });
+    let error = client.send_text("hello").unwrap_err();
+    assert_eq!(error.code(), "no_active_element");
+    assert!(
+        error.to_string().contains("tap into a text field"),
+        "{error}"
+    );
 }
 
 /// 回读不含发送内容 → `text_unconfirmed`。
@@ -133,6 +154,26 @@ fn wake_reports_device_locked_when_it_stays_locked() {
     });
     assert_eq!(client.wake().unwrap_err().code(), "device_locked");
     // 没有任何密码通路：请求里不该出现 passcode 之类的东西。
+    let requests = server.requests.lock().unwrap().join(" ");
+    assert!(!requests.to_lowercase().contains("passcode"), "{requests}");
+}
+
+/// `unlock` 返回 500 但屏幕已亮、仍锁定 → `device_locked`，**不是**会话故障。
+///
+/// 真机（iPhone SE 3 + WDA 16.12.8，有密码）：`POST /wda/unlock` 阻塞约 8 s 后
+/// 返回 500 `Timed out while waiting until the screen is unlocked`，此后
+/// `/wda/locked` 仍为 true——屏幕停在密码页，这正是我们要的唤醒效果。早先这条会
+/// 被映射成 `wda_session_failed`，界面显示「无法建立会话」，是纯误报。
+#[test]
+fn wake_maps_an_erroring_unlock_to_device_locked() {
+    let (server, client) = connected(FakeWdaConfig {
+        locked: true,
+        unlock_errors: true,
+        ..FakeWdaConfig::healthy()
+    });
+    assert_eq!(client.wake().unwrap_err().code(), "device_locked");
+    assert!(server.saw("wda/unlock"), "unlock 根本没发出去");
+    // 仍然没有任何密码通路。
     let requests = server.requests.lock().unwrap().join(" ");
     assert!(!requests.to_lowercase().contains("passcode"), "{requests}");
 }

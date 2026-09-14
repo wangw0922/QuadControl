@@ -64,6 +64,11 @@ pub enum Error {
     DeviceLocked,
     /// 文字已发出但**回读不含发送内容**，无法确认送达。
     TextUnconfirmed,
+    /// 设备上没有聚焦的输入框，文字无处可送。
+    ///
+    /// 真机上 `GET /session/{s}/element/active` 此时返回 `nosuchelement`。
+    /// 这不是故障，是一个用户自己就能修的状态，所以单独给一个码。
+    NoActiveElement,
     /// 截屏失败（或返回的 base64 无法解码）。
     ScreenshotFailed(String),
     /// 已有 iOS 会话在跑；同一时刻最多一个。
@@ -91,6 +96,7 @@ impl Error {
             Self::ProxyFailed(_) => "proxy_failed",
             Self::DeviceLocked => "device_locked",
             Self::TextUnconfirmed => "text_unconfirmed",
+            Self::NoActiveElement => "no_active_element",
             Self::ScreenshotFailed(_) => "screenshot_failed",
             Self::AlreadyRunning => "ios_session_already_running",
             Self::WindowsSessionUnsupported => "windows_session_unsupported",
@@ -126,6 +132,9 @@ impl fmt::Display for Error {
             Self::DeviceLocked => f.write_str("the iPhone is locked; unlock it on the device"),
             Self::TextUnconfirmed => {
                 f.write_str("the text could not be confirmed as delivered; check the iPhone")
+            }
+            Self::NoActiveElement => {
+                f.write_str("no focused text field on the device; tap into a text field first")
             }
             Self::AlreadyRunning => f.write_str("an iOS session is already running"),
             Self::WindowsSessionUnsupported => {
@@ -331,6 +340,7 @@ mod tests {
             ),
             (Error::TunnelPortBusy(28100), "tunnel_port_busy"),
             (Error::TunnelFailed(String::new()), "tunnel_failed"),
+            (Error::NoActiveElement, "no_active_element"),
             (Error::WdaNotInstalled(String::new()), "wda_not_installed"),
             (
                 Error::WdaSignatureExpired(String::new()),
