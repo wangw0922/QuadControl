@@ -33,6 +33,14 @@
         <symbol id="icon-check" viewBox="0 0 24 24">
           <path d="M20 6 9 17l-5-5"></path>
         </symbol>
+        <symbol id="icon-sun" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+        </symbol>
+        <symbol id="icon-house" viewBox="0 0 24 24">
+          <path d="M3 9.5 12 3l9 6.5"></path>
+          <path d="M5 11v9h14v-9"></path>
+        </symbol>
         <symbol id="icon-qr-code" viewBox="0 0 24 24">
           <rect x="3" y="3" width="5" height="5" rx="1"></rect>
           <rect x="16" y="3" width="5" height="5" rx="1"></rect>
@@ -72,6 +80,7 @@
 
         <p id="session-empty" class="session-empty" data-i18n="noDevices" hidden></p>
         <div id="session-content" class="session-content">
+          <div id="android-panel" class="platform-panel">
           <section class="mirror-card card elev-sm" data-i18n-aria-label="mirrorDescription">
             <div class="phone-placeholder">
               <svg class="icon mirror-phone" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
@@ -140,6 +149,73 @@
               <p data-i18n="safetyDescription"></p>
             </aside>
           </div>
+          </div>
+
+          <!-- 界面 C：iPhone 控制面板。与 Android 面板互斥显示。 -->
+          <section id="ios-panel" class="platform-panel" hidden>
+            <div id="ios-stage-column" class="ios-stage-column">
+              <div id="ios-stage" class="ios-stage">
+                <img id="ios-stream" class="ios-stream" alt="" />
+                <div id="ios-stage-placeholder" class="ios-stage-placeholder">
+                  <svg class="icon mirror-phone" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
+                  <span data-i18n="iosStageHint"></span>
+                </div>
+              </div>
+              <span id="ios-fps" class="tag tag-accent-2"></span>
+              <p id="ios-locked" class="ios-locked" data-i18n="iosLocked" hidden></p>
+            </div>
+
+            <div class="control-column">
+              <section id="ios-mirroring-card" class="card ios-guidance-card" hidden>
+                <h2>
+                  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-monitor"></use></svg>
+                  <span data-i18n="iosMirroringTitle"></span>
+                </h2>
+                <p data-i18n="iosMirroringDescription"></p>
+                <div class="ios-guidance-actions">
+                  <button id="open-mirroring" class="btn btn-secondary" type="button" data-i18n="iosMirroringOpen"></button>
+                  <span id="mirroring-note" class="ios-note" hidden></span>
+                </div>
+              </section>
+
+              <section id="ios-text-card" class="card elev-sm ios-text-card">
+                <label class="field" for="ios-text">
+                  <span data-i18n="iosSendTextLabel"></span>
+                  <span class="ios-text-row">
+                    <input id="ios-text" class="input" type="text" data-i18n-placeholder="iosSendTextPlaceholder" />
+                    <button id="ios-send" class="btn btn-primary" type="button" data-i18n="iosSend"></button>
+                  </span>
+                </label>
+                <p id="ios-text-result" class="ios-note" aria-live="polite" hidden></p>
+              </section>
+
+              <section id="ios-action-card" class="card elev-sm ios-action-card" data-i18n-aria-label="sessionControls">
+                <button id="ios-wake" class="btn btn-secondary" type="button">
+                  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-sun"></use></svg>
+                  <span data-i18n="iosWake"></span>
+                </button>
+                <button id="ios-capture" class="btn btn-secondary" type="button">
+                  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-camera"></use></svg>
+                  <span data-i18n="iosCapture"></span>
+                </button>
+                <button id="ios-home" class="btn btn-secondary" type="button">
+                  <svg class="icon icon-sm" aria-hidden="true"><use href="#icon-house"></use></svg>
+                  <span data-i18n="iosHome"></span>
+                </button>
+                <p id="ios-action-result" class="ios-note" aria-live="polite" hidden></p>
+              </section>
+
+              <section class="card ios-note-card">
+                <h2 data-i18n="iosSoundTitle"></h2>
+                <p data-i18n="iosSoundDescription"></p>
+              </section>
+
+              <section class="card ios-note-card">
+                <h2 data-i18n="iosLimitsTitle"></h2>
+                <p data-i18n="iosLimitsDescription"></p>
+              </section>
+            </div>
+          </section>
         </div>
       </section>
     </main>

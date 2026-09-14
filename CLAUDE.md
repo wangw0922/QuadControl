@@ -109,7 +109,7 @@ GitHub Actions 覆盖。
 - ✅ iPhone 侧 go-ios/WDA 链路（经 macOS 宿主实测）
 - ✅ GUI（Tauri v2）：G0 三平台闭环；P1 设备列表真数据、P2 Android 一键会话、
   P3 配对向导接真 adb（M1「单机可用」）
-- ⬜ P4 iPhone 控制面板（界面 C）
+- ✅ P4 iPhone 控制面板（界面 C）：代码合并（P4.0–P4.2），**真机验收未执行**
 - ⬜ P5.2 Android 被控端 App：范围待产品决策
 - ⬜ CI-W / P6：Windows CI 与 Windows/Linux 真机引擎验证
 - ⬜ P7 三平台打包发布

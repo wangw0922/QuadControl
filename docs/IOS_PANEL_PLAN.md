@@ -1,6 +1,6 @@
 # P4 iPhone 控制面板方案（界面 C；= GUI_PLAN G4）
 
-状态：**评审后定稿**（2026-09-13，一轮 Fable 对抗性评审，3 阻塞 / 12 应改全部采纳，
+状态：**已实施**（P4.0 #27 / P4.1 #28 / P4.2 #29，2026-09-14；真机验收未执行）。方案定稿于 2026-09-13，一轮 Fable 对抗性评审，3 阻塞 / 12 应改全部采纳，
 裁决见第六节）。范围与验收以 [MASTER_PLAN.md](MASTER_PLAN.md) P4 为准；能力与限制
 的事实来源是 [agents/ios-wda/README.md](../agents/ios-wda/README.md)（真机测量）与
 [CONTROL_ARCHITECTURE.md](CONTROL_ARCHITECTURE.md)。
@@ -135,7 +135,10 @@ proxy_port / window_size）、`ios_tap {x,y}`（内容矩形归一化 0–1）�
 `tunnel_failed`、`wda_not_installed`、`wda_signature_expired`（runwda 的对应错误）、
 `wda_unreachable`、`wda_session_failed`、`forward_failed`、`proxy_failed`、
 `device_locked`、`text_unconfirmed`、`screenshot_failed`、
-`ios_session_already_running`、`windows_session_unsupported`。
+`ios_session_already_running`、`windows_session_unsupported`；实现时补充：
+`ios_process_error`（库的底层 IO 错误）、`ios_session_not_running`、
+`macos_uses_iphone_mirroring`（macOS 后端第二道闸）、`iphone_mirroring_failed`、
+`unsupported`、`ios_link_lost`（tunnel/runwda/forward 自亡后的前端文案）。
 
 前端：`renderSession()` 按 `device.platform` 分流，macOS 渲染引导卡变体；画面容器按
 `window/size` 的长宽比定尺（不用固定 246×500 硬拉伸），点击按实际内容矩形归一化；
@@ -175,6 +178,18 @@ proxy_port / window_size）、`ios_tap {x,y}`（内容矩形归一化 0–1）�
 - `ios tunnel start` 若实测仍需提权，界面明示，不静默提权。
 - WDA 由用户自备签名版本，本仓库不携带 WDA 源码或二进制。
 - 帧率标签是代理计数，不是设备刷新率；GUI 无任何刷新率控件（红线）。
+- **并行梯子的已知边界**（P4.1 复审 G1 残留）：`terminate_all` 每级对整个进程组
+  发信号，但完成判据是「所有直接子进程可收尸」。若组长全部已退出而组内仍有辅助
+  进程，梯子在第一级就返回、不再升级。改成等「进程组为空」是另一个语义，留待真机
+  验收第 3 条（`pgrep -x ios` 为空）暴露后再定。
+- **MJPEG 上游的三条假设未测量**：accept 后不发请求 WDA 就推响应头、边界写法、每段
+  带 Content-Length。代理能吃下带/不带 `--` 的边界与无 Content-Length 的段，但上游
+  读头阶段没有超时；真机验收时校准。
+- GUI 的会话槽位在预检（`ios version` + 端口探测，几百毫秒）期间是 `Starting`
+  占位：此时「断开连接」只记日志不生效，退出应用也收不到尚未诞生的句柄。堵这个
+  窗口需要给库的 `spawn_supervised` 加可取消预检，留待真机验收后视需要再做。
+- macOS 产品路径的引导卡只有在 go-ios 把设备列出来时才可达；未装 go-ios 的 Mac
+  用户看不到「打开 iPhone 镜像」。P7 决定是否让引导卡不依赖设备发现。
 
 ## 六、评审裁决记录（2026-09-13）
 

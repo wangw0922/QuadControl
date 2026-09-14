@@ -2283,11 +2283,27 @@ dependencies = [
 name = "quadcontrol-gui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "dirs",
  "quadcontrol-adb-probe",
  "quadcontrol-android",
+ "quadcontrol-ios",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+]
+
+[[package]]
+name = "quadcontrol-ios"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "quadcontrol-process",
+ "serde",
+ "serde_json",
+ "ureq",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3599,6 +3615,20 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "ureq"
+version = "2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
+dependencies = [
+ "base64 0.22.1",
+ "log",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "url",
+]
 
 [[package]]
 name = "url"

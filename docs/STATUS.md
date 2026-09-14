@@ -3,7 +3,7 @@
 The end-to-end roadmap from the current state to the finished product — system
 boundaries and per-step acceptance criteria — is [MASTER_PLAN.md](MASTER_PLAN.md).
 
-Updated 2026-09-13. Control directions are fixed — see
+Updated 2026-09-14. Control directions are fixed — see
 [control architecture](CONTROL_ARCHITECTURE.md): every desktop
 (Windows/macOS/Linux)→Android rides **scrcpy** as the engine;
 Windows/Linux→iPhone goes through go-ios and WebDriverAgent; macOS→iPhone uses
@@ -64,9 +64,23 @@ Apple's iPhone Mirroring rather than anything of ours.
     path, manual pairing on the same state machine, pairing secret never
     derives `Debug`/`Clone`. **Not yet verified end-to-end on a real handset**
     through the GUI (the underlying `pair-qr` CLI path was).
-- Still missing on the desktop side: the iPhone panel (P4), Windows/Linux
-  real-device engine verification (P6), and packaging (P7). See
-  [MASTER_PLAN.md](MASTER_PLAN.md).
+- **P4 iPhone control panel** (merged 2026-09-14, PRs #27 / #28 / #29):
+  `quadcontrol-process` (shared process-group / termination ladder /
+  stderr ring buffer), `quadcontrol-ios` (go-ios 1.2.1 version clamp with
+  real usage fixtures, WDA client with effect verification — text read-back,
+  wake verified via `locked`, never `/wda/keys` — MJPEG proxy with a
+  single-slot latest-frame buffer, supervised session with a **parallel**
+  termination ladder measured under 7 s with all four children ignoring
+  SIGINT and SIGTERM, Linux `PR_SET_PDEATHSIG`), and screen C in the GUI
+  (macOS renders only the iPhone Mirroring guidance card; Windows refuses
+  sessions until P6). **Not verified on hardware**: no go-ios or validly
+  signed WDA on the development host. Uncalibrated against a real device:
+  runwda/usbmuxd stderr keyword tables, `/wda/unlock`, the WDA MJPEG
+  upstream framing, the default WDA bundle ids. The acceptance steps are in
+  [IOS_PANEL_PLAN.md](IOS_PANEL_PLAN.md) §四 and need an iPhone SE 3 plus a
+  freshly signed WDA.
+- Still missing on the desktop side: Windows/Linux real-device engine
+  verification (P6) and packaging (P7). See [MASTER_PLAN.md](MASTER_PLAN.md).
 
 ## Not started
 
