@@ -32,6 +32,9 @@ const FAKE_UDID: &str = "REDACTEDSERIAL-0001";
 // 不加这个 gate，交叉 clippy 会把它判成 dead_code。
 #[cfg(unix)]
 const CHILD_HARNESS_MARKER: &str = "QUADCONTROL_IOS_PDEATHSIG_PID_DIR";
+/// 覆盖假隧道信息端口区间基址；见 [`unique_tunnel_port`]。
+#[cfg(unix)]
+const TUNNEL_PORT_BASE_ENV: &str = "QUADCONTROL_IOS_TEST_TUNNEL_PORT_BASE";
 
 // 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
 // （windows 上 Launch 直接返回 `windows_session_unsupported`）。
@@ -60,10 +63,19 @@ fn helper() -> PathBuf {
 #[cfg(unix)]
 fn unique_tunnel_port() -> u16 {
     /// 低于 macOS / Linux 的临时端口范围，避开被 bind 0 分配到的可能。
+    ///
+    /// re-exec 出来的 PDEATHSIG harness 是**另一个进程**，计数器从头开始；若与
+    /// 父测试进程共用同一区间，两边会互相抢端口（CI 上实测：harness 的假 tunnel
+    /// 绑端口失败而死，就绪探测却连上了父进程里别人的隧道）。所以区间基址可由
+    /// 环境变量覆盖，父进程给 harness 一个不相交的区间。
     const BASE: u16 = 28200;
     static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = std::env::var(TUNNEL_PORT_BASE_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(BASE);
     for _ in 0..200 {
-        let port = BASE + NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = base + NEXT.fetch_add(1, Ordering::Relaxed);
         // bind 成功即释放：证明此刻没人占，且这个号不会被临时端口池再分配出去。
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
@@ -891,6 +903,8 @@ fn children_die_with_a_sigkilled_parent() {
             "--nocapture",
         ])
         .env(CHILD_HARNESS_MARKER, pid_dir.to_string_lossy().into_owned())
+        // 与本进程的 28200 起区间不相交，避免跨进程抢假隧道端口。
+        .env(TUNNEL_PORT_BASE_ENV, "28600")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         // stderr 落盘：中间父进程起会话失败时，这是唯一的诊断线索（CI 上只跑 Linux，
