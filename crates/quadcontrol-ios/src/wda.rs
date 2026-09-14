@@ -1,0 +1,473 @@
+//! WebDriverAgent 的阻塞式 HTTP 客户端。
+//!
+//! 每个请求都有超时（[`REQUEST_TIMEOUT`]）和响应上限（[`BODY_LIMIT`]）——红线
+//! 要求「每个子进程/每次调用有超时与输出上限，不无界阻塞」。
+//!
+//! **结果码来自效果核验，不是 HTTP 200。** 真机测出 WDA 有三种静默失败，本模块
+//! 对应地做了三处核验：
+//! 1. [`Client::send_text`] 写完回读属性，不一致就报 [`Error::TextUnconfirmed`]；
+//! 2. [`Client::wake`] 调前调后对比 [`Client::locked`]，仍锁定报 [`Error::DeviceLocked`]；
+//! 3. 锁屏截图会返回**合法的全黑 PNG**，所以「停帧 / 黑屏」一律不当作锁屏信号，
+//!    锁定提示只由 `/wda/locked` 驱动（本模块不做黑帧检测，代理也不解码 JPEG）。
+
+use crate::Error;
+use std::io::Read;
+use std::time::Duration;
+
+/// 单次请求超时。
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// 响应体上限；截屏的 base64 PNG 是最大的一个响应。
+pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// `delete_session` 的超时：退出序列里它只是礼貌性调用，不能拖慢关闭预算。
+pub const DELETE_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// 设备窗口尺寸，单位是**点**（不是像素）。真机 iPhone SE 3 是 375×667。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// WDA 客户端。克隆代价低（只有一个 URL、一个可选 session id 和 ureq 的 Agent），
+/// 监督线程持有一份，GUI 命令层通过 [`crate::session::IosSessionHandle::client`]
+/// 拿到克隆。
+#[derive(Debug, Clone)]
+pub struct Client {
+    base_url: String,
+    session_id: Option<String>,
+    agent: ureq::Agent,
+}
+
+impl Client {
+    /// 对着 `http://127.0.0.1:<port>` 建客户端。
+    pub fn new(http_port: u16) -> Self {
+        Self::with_base_url(format!("http://127.0.0.1:{http_port}"))
+    }
+
+    /// 对着任意 base URL 建客户端（测试用假 WDA 服务时走这条）。
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            session_id: None,
+            agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
+        }
+    }
+
+    /// 当前 session id；[`Client::create_session`] 之前是 None。
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    fn session(&self) -> Result<&str, Error> {
+        self.session_id
+            .as_deref()
+            .ok_or_else(|| Error::WdaSessionFailed("no WDA session has been created".into()))
+    }
+
+    /// `GET /status`：就绪探测。起 WDA 后由调用方轮询。
+    pub fn status(&self) -> Result<serde_json::Value, Error> {
+        self.get("/status", Error::WdaUnreachable)
+    }
+
+    /// `POST /session`：建会话并记下 session id。
+    pub fn create_session(&mut self) -> Result<String, Error> {
+        let body = serde_json::json!({ "capabilities": { "alwaysMatch": {} } });
+        let value = self.post("/session", &body, Error::WdaSessionFailed)?;
+        // WDA 把 sessionId 放在顶层或 value 里，两种形状都见过。
+        let id = value
+            .get("sessionId")
+            .or_else(|| value.pointer("/value/sessionId"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::WdaSessionFailed("WDA response has no sessionId".into()))?
+            .to_owned();
+        self.session_id = Some(id.clone());
+        Ok(id)
+    }
+
+    /// `POST /session/{s}/appium/settings`：限 MJPEG 帧率与画质。
+    ///
+    /// **这只作用在编码器侧**，与设备刷新率毫无关系——红线明令绝不修改设备
+    /// 显示刷新率，本库没有也不会有任何刷新率参数。
+    pub fn configure_mjpeg(&self, fps: u32, quality: u32) -> Result<(), Error> {
+        let path = format!("/session/{}/appium/settings", self.session()?);
+        let body = serde_json::json!({
+            "settings": {
+                "mjpegServerFramerate": fps,
+                "mjpegServerScreenshotQuality": quality,
+            }
+        });
+        self.post(&path, &body, Error::WdaSessionFailed)?;
+        Ok(())
+    }
+
+    /// `GET /session/{s}/window/size`：旋转会改变它，调用方按状态轮询刷新。
+    pub fn window_size(&self) -> Result<WindowSize, Error> {
+        let path = format!("/session/{}/window/size", self.session()?);
+        let value = self.get(&path, Error::WdaSessionFailed)?;
+        let size = value.get("value").unwrap_or(&value);
+        let field = |name: &str| {
+            size.get(name)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| Error::WdaSessionFailed(format!("window size has no {name}")))
+        };
+        Ok(WindowSize {
+            width: field("width")? as u32,
+            height: field("height")? as u32,
+        })
+    }
+
+    /// `POST /session/{s}/actions`：W3C pointer 点按，坐标单位是**点**。
+    ///
+    /// 锁定时不转发：锁屏下点按不会产生效果，却不会报错（静默失败之一）。
+    pub fn tap(&self, x_pt: f64, y_pt: f64) -> Result<(), Error> {
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
+        let path = format!("/session/{}/actions", self.session()?);
+        let body = serde_json::json!({
+            "actions": [{
+                "type": "pointer",
+                "id": "finger1",
+                "parameters": { "pointerType": "touch" },
+                "actions": [
+                    { "type": "pointerMove", "duration": 0, "x": x_pt, "y": y_pt },
+                    { "type": "pointerDown", "button": 0 },
+                    { "type": "pause", "duration": 50 },
+                    { "type": "pointerUp", "button": 0 },
+                ],
+            }],
+        });
+        self.post(&path, &body, Error::WdaSessionFailed)?;
+        Ok(())
+    }
+
+    /// `POST /wda/homescreen`：回主屏。这是**顶层**端点，不带 session 段。
+    pub fn home(&self) -> Result<(), Error> {
+        self.post("/wda/homescreen", &serde_json::json!({}), |e| {
+            Error::WdaSessionFailed(e)
+        })?;
+        Ok(())
+    }
+
+    /// `GET /session/{s}/wda/locked`：锁定状态。
+    ///
+    /// 这是**唯一**的锁定判据。停帧、黑屏都不是锁屏信号：真机测过，锁屏后截图
+    /// 返回的是合法的全黑 PNG，没有任何错误。
+    pub fn locked(&self) -> Result<bool, Error> {
+        let path = format!("/session/{}/wda/locked", self.session()?);
+        let value = self.get(&path, Error::WdaSessionFailed)?;
+        value
+            .get("value")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| Error::WdaSessionFailed("locked response has no boolean value".into()))
+    }
+
+    /// `POST /session/{s}/wda/unlock`：唤醒屏幕。
+    ///
+    /// 这是公开的 XCUITest 操作（Home + 上滑），**不是锁屏绕过**：设了密码的设备
+    /// 会停在密码页，由用户自己在手机上解锁。本函数**绝不发送密码**，本库任何
+    /// 地方都没有密码通路。
+    ///
+    /// 效果核验 = 调用前后对比 [`Client::locked`]。解锁有动画，立刻回读会假阴性，
+    /// 所以做**有界**轮询（[`UNLOCK_SETTLE_BUDGET`]）；预算内仍锁定就报
+    /// [`Error::DeviceLocked`]——那通常意味着设备有密码，需要用户介入。
+    ///
+    /// 注意：本操作在真机上**未测量**（README 如实标注），真机验收时要补测并回写。
+    pub fn wake(&self) -> Result<(), Error> {
+        if !self.locked()? {
+            return Ok(());
+        }
+        let path = format!("/session/{}/wda/unlock", self.session()?);
+        self.post(&path, &serde_json::json!({}), Error::WdaSessionFailed)?;
+
+        let deadline = std::time::Instant::now() + UNLOCK_SETTLE_BUDGET;
+        loop {
+            if !self.locked()? {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::DeviceLocked);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// `GET /screenshot`：返回解码后的 PNG 字节。
+    ///
+    /// **调用方必须知道**：锁屏时这里会返回一张完全合法、内容全黑的 PNG，没有
+    /// 任何错误。要判断是不是锁屏，问 [`Client::locked`]，不要看像素。
+    pub fn screenshot_png(&self) -> Result<Vec<u8>, Error> {
+        let value = self.get("/screenshot", Error::ScreenshotFailed)?;
+        let encoded = value
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::ScreenshotFailed("screenshot response has no value".into()))?;
+        decode_base64(encoded)
+            .ok_or_else(|| Error::ScreenshotFailed("screenshot was not valid base64".into()))
+    }
+
+    /// 向当前聚焦元素送文字，并**回读核验**。
+    ///
+    /// 流程：`POST element/active` 取元素 → `POST element/{e}/value` 写入 →
+    /// `GET element/{e}/attribute/value` 回读。回读不含发送内容就报
+    /// [`Error::TextUnconfirmed`]，文案由 GUI 给（「无法确认已送达，请在手机上核对」）。
+    ///
+    /// **绝不调用 `POST /wda/keys`。** 真机验证两次（无聚焦元素、以及光标可见键盘
+    /// 弹起的正常聚焦状态）：它**返回成功而字符从不送达**。设备当时启用了简体中文
+    /// 拼音输入法，而那正是本项目用户的默认配置，所以 `wda/keys` 按「不可用」处理，
+    /// 不是边缘情况。详见 `agents/ios-wda/README.md`。
+    ///
+    /// 安全输入框（密码框）回读为空是**正常**的，同样会走到 `TextUnconfirmed`——
+    /// 这是可接受的假阳性：宁可让用户去手机上核对，也不要谎称送达。
+    pub fn send_text(&self, text: &str) -> Result<(), Error> {
+        // 空串没有可核验的效果：回读永远「不含」空串之外的东西，送不送都一样，
+        // 只会走到一个让人困惑的 `TextUnconfirmed`。直接挡住。
+        if text.is_empty() {
+            return Err(Error::WdaSessionFailed("empty text".into()));
+        }
+        // 与 `tap` 一致：锁定时不转发。锁屏下文字不会送达，而 WDA 不会报错
+        // （静默失败之一），照发只会得到一个假的「已发送」。
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
+        let session = self.session()?;
+        let active = self.post(
+            &format!("/session/{session}/element/active"),
+            &serde_json::json!({}),
+            Error::WdaSessionFailed,
+        )?;
+        let element = element_id(&active)
+            .ok_or_else(|| Error::WdaSessionFailed("no active element on the device".into()))?;
+
+        self.post(
+            &format!("/session/{session}/element/{element}/value"),
+            &serde_json::json!({ "value": [text] }),
+            Error::WdaSessionFailed,
+        )?;
+
+        let read_back = self.get(
+            &format!("/session/{session}/element/{element}/attribute/value"),
+            Error::WdaSessionFailed,
+        )?;
+        let actual = read_back
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if actual.contains(text) {
+            Ok(())
+        } else {
+            Err(Error::TextUnconfirmed)
+        }
+    }
+
+    /// `DELETE /session/{s}`：退出序列里的礼貌性调用。
+    ///
+    /// 超时压到 [`DELETE_SESSION_TIMEOUT`]（≤ 1 s）：WDA 这时可能已经在死，
+    /// 不能让它拖累关闭预算。失败一律忽略——终止梯子才是真正的回收手段。
+    pub fn delete_session(&self) -> Result<(), Error> {
+        let session = self.session()?;
+        let agent = ureq::AgentBuilder::new()
+            .timeout(DELETE_SESSION_TIMEOUT)
+            .build();
+        let _ = agent
+            .delete(&format!("{}/session/{session}", self.base_url))
+            .call();
+        Ok(())
+    }
+
+    fn get(&self, path: &str, wrap: impl Fn(String) -> Error) -> Result<serde_json::Value, Error> {
+        let response = self
+            .agent
+            .get(&format!("{}{path}", self.base_url))
+            .call()
+            .map_err(|e| wrap(describe(path, e)))?;
+        read_json(response, path, &wrap)
+    }
+
+    fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        wrap: impl Fn(String) -> Error,
+    ) -> Result<serde_json::Value, Error> {
+        let response = self
+            .agent
+            .post(&format!("{}{path}", self.base_url))
+            .send_json(body.clone())
+            .map_err(|e| wrap(describe(path, e)))?;
+        read_json(response, path, &wrap)
+    }
+}
+
+/// 解锁动画的有界等待预算；见 [`Client::wake`]。
+pub const UNLOCK_SETTLE_BUDGET: Duration = Duration::from_secs(2);
+
+/// 从 `element/active` 的响应里取元素 id。
+///
+/// WDA 会用旧的 `ELEMENT` 键或 W3C 的 `element-6066-11e4-a52e-4f735466cecf` 键，
+/// 版本之间不一致，两种都认。
+fn element_id(value: &serde_json::Value) -> Option<String> {
+    let holder = value.get("value").unwrap_or(value);
+    for key in ["ELEMENT", "element-6066-11e4-a52e-4f735466cecf"] {
+        if let Some(id) = holder.get(key).and_then(serde_json::Value::as_str) {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+/// 把 ureq 的错误转成带上下文的文案。
+///
+/// ureq 2.x 对 4xx/5xx 返回 `Error::Status(code, response)`，而 WDA 恰恰把失败
+/// 原因放在那个响应体里，所以要把它读出来，不能只报一个状态码。
+fn describe(path: &str, error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, response) => {
+            let mut body = Vec::new();
+            let _ = response
+                .into_reader()
+                .take(BODY_LIMIT as u64)
+                .read_to_end(&mut body);
+            let text = String::from_utf8_lossy(&body);
+            format!("WDA {path} returned {code}: {}", text.trim())
+        }
+        ureq::Error::Transport(transport) => format!("WDA {path} is unreachable: {transport}"),
+    }
+}
+
+/// 读响应体并解析 JSON，带 [`BODY_LIMIT`] 上限。
+///
+/// 多读一个字节来判断是否**超**限：`take(n)` 读满 n 字节时无法区分「正好 n」和
+/// 「被截断」，而截断后的 JSON 解析失败会报成一个误导性的语法错误。
+fn read_json(
+    response: ureq::Response,
+    path: &str,
+    wrap: &impl Fn(String) -> Error,
+) -> Result<serde_json::Value, Error> {
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(BODY_LIMIT as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| wrap(format!("WDA {path} body could not be read: {e}")))?;
+    if body.len() > BODY_LIMIT {
+        return Err(wrap(format!(
+            "WDA {path} response exceeded the {BODY_LIMIT} byte limit"
+        )));
+    }
+    if body.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| wrap(format!("WDA {path} returned unparsable JSON: {e}")))
+}
+
+/// 标准 base64 解码（RFC 4648，带 `=` 填充）。
+///
+/// 手写而不是加一个 crate：整个仓库只有截屏这一处用得到 base64，解码器本身
+/// 30 行、可测，比多一条供应链依赖划算。非法字符、非法长度一律返回 None。
+/// 空白（WDA 有时会在 base64 里插换行）被跳过。
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn sextet(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => u32::from(c - b'A'),
+            b'a'..=b'z' => u32::from(c - b'a') + 26,
+            b'0'..=b'9' => u32::from(c - b'0') + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+
+    let cleaned: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let (payload, padding) = match cleaned.iter().position(|&b| b == b'=') {
+        Some(at) => {
+            // 填充只能出现在末尾，且最多两个。
+            if cleaned[at..].iter().any(|&b| b != b'=') || cleaned.len() - at > 2 {
+                return None;
+            }
+            (&cleaned[..at], cleaned.len() - at)
+        }
+        None => (&cleaned[..], 0),
+    };
+    if (payload.len() + padding) % 4 != 0 {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(payload.len() / 4 * 3);
+    let mut accumulator = 0u32;
+    let mut bits = 0u32;
+    for &byte in payload {
+        accumulator = (accumulator << 6) | sextet(byte)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((accumulator >> bits) as u8);
+        }
+    }
+    // 残余位必须是填充产生的零位；否则输入被截断过。
+    if accumulator & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_round_trips_known_vectors() {
+        // RFC 4648 测试向量，覆盖三种填充长度。
+        for (encoded, decoded) in [
+            ("", ""),
+            ("Zg==", "f"),
+            ("Zm8=", "fo"),
+            ("Zm9v", "foo"),
+            ("Zm9vYg==", "foob"),
+            ("Zm9vYmE=", "fooba"),
+            ("Zm9vYmFy", "foobar"),
+        ] {
+            assert_eq!(
+                decode_base64(encoded).unwrap(),
+                decoded.as_bytes(),
+                "{encoded}"
+            );
+        }
+        // PNG magic：截屏路径真正要解出来的东西。
+        assert_eq!(
+            decode_base64("iVBORw0KGgo=").unwrap(),
+            [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+        // 内嵌空白要能跳过。
+        assert_eq!(decode_base64("Zm9v\nYmFy").unwrap(), b"foobar");
+    }
+
+    #[test]
+    fn base64_rejects_malformed_input() {
+        assert!(decode_base64("Zm9vYg=").is_none(), "长度不是 4 的倍数");
+        assert!(decode_base64("Zm9*").is_none(), "非法字符");
+        assert!(decode_base64("Z=m8").is_none(), "填充不在末尾");
+        assert!(decode_base64("Zg===").is_none(), "填充过长");
+    }
+
+    #[test]
+    fn element_id_accepts_both_legacy_and_w3c_keys() {
+        let legacy = serde_json::json!({ "value": { "ELEMENT": "42" } });
+        let w3c = serde_json::json!({ "value": { "element-6066-11e4-a52e-4f735466cecf": "abc" } });
+        assert_eq!(element_id(&legacy).unwrap(), "42");
+        assert_eq!(element_id(&w3c).unwrap(), "abc");
+        assert!(element_id(&serde_json::json!({ "value": {} })).is_none());
+    }
+
+    /// 没建会话就调带 session 的方法，必须响亮失败，而不是拼出 `/session//…`。
+    #[test]
+    fn session_scoped_calls_require_a_session() {
+        let client = Client::new(1);
+        assert_eq!(
+            client.window_size().unwrap_err().code(),
+            "wda_session_failed"
+        );
+        assert!(client.session_id().is_none());
+    }
+}
