@@ -893,7 +893,9 @@ fn children_die_with_a_sigkilled_parent() {
         .env(CHILD_HARNESS_MARKER, pid_dir.to_string_lossy().into_owned())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // stderr 落盘：中间父进程起会话失败时，这是唯一的诊断线索（CI 上只跑 Linux，
+        // 本机 macOS 看不到这条用例）。
+        .stderr(std::fs::File::create(pid_dir.join("harness.stderr")).unwrap())
         .spawn()
         .unwrap();
 
@@ -910,11 +912,20 @@ fn children_die_with_a_sigkilled_parent() {
         if pids.len() >= 4 {
             break pids;
         }
-        assert!(
-            Instant::now() < deadline,
-            "中间父进程没能起好会话，只看到 {} 个 PID",
-            pids.len()
-        );
+        if Instant::now() >= deadline || child.try_wait().ok().flatten().is_some() {
+            let names: Vec<String> = std::fs::read_dir(&pid_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            let stderr =
+                std::fs::read_to_string(pid_dir.join("harness.stderr")).unwrap_or_default();
+            let _ = child.kill();
+            panic!(
+                "中间父进程没能起好会话，只看到 {} 个 PID；目录 {names:?}；harness stderr:\n{stderr}",
+                pids.len()
+            );
+        }
         thread::sleep(Duration::from_millis(50));
     };
 
