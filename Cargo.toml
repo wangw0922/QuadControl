@@ -6,6 +6,7 @@ members = [
   "agents/android-shell/adb-probe",
   "crates/quadcontrol-android",
   "crates/quadcontrol-process",
+  "crates/quadcontrol-ios",
 ]
 resolver = "2"
 

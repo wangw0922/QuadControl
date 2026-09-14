@@ -1,0 +1,26 @@
+[package]
+name = "quadcontrol-ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ios-test-helper"
+path = "src/bin/ios-test-helper.rs"
+
+[dependencies]
+quadcontrol-process = { path = "../quadcontrol-process" }
+# 阻塞式 HTTP：WDA 只在 127.0.0.1 上，不需要 TLS，所以关掉默认特性。
+# 钉在 2.x：3.x 换了 API 面，升级要连同超时/错误映射一起重测。
+ureq = { version = "2.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
