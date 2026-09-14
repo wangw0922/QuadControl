@@ -994,7 +994,10 @@ fn pdeathsig_child_harness() {
         tunnel_info_port: unique_tunnel_port(),
         status_budget: Duration::from_secs(30),
     };
-    let handle = spawn_supervised(&options, 51).unwrap();
+    // 本 harness 是**另一个进程**：它的端口计数从头开始，会撞上父测试进程里其它
+    // 用例正持有的假隧道端口（CI 上实测 `TunnelPortBusy(28200)`）。同样只对
+    // `tunnel_port_busy` 重试，其它错误照样 panic。
+    let handle = spawn_with_port_retry(&options, 51);
     wait_for_running(&handle);
     // 长睡等着被 kill -9；绝不自行退出，否则测的就不是 PDEATHSIG。
     loop {
