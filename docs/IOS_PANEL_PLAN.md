@@ -138,7 +138,8 @@ proxy_port / window_size）、`ios_tap {x,y}`（内容矩形归一化 0–1）�
 `ios_session_already_running`、`windows_session_unsupported`；实现时补充：
 `ios_process_error`（库的底层 IO 错误）、`ios_session_not_running`、
 `macos_uses_iphone_mirroring`（macOS 后端第二道闸）、`iphone_mirroring_failed`、
-`unsupported`、`ios_link_lost`（tunnel/runwda/forward 自亡后的前端文案）。
+`unsupported`、`ios_link_lost`（tunnel/runwda/forward 自亡后的前端文案）、
+`no_active_element`（真机：无聚焦输入框时 `GET element/active` 回 nosuchelement）。
 
 前端：`renderSession()` 按 `device.platform` 分流，macOS 渲染引导卡变体；画面容器按
 `window/size` 的长宽比定尺（不用固定 246×500 硬拉伸），点击按实际内容矩形归一化；

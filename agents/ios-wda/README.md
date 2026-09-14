@@ -31,6 +31,27 @@ are still unverified — that needs a Windows host.
 | Home | top-level `POST /wda/homescreen` works |
 | Text input | **only** `POST /session/{id}/element/{id}/value` works |
 
+## Second measurement pass (2026-09-14, go-ios 1.2.1, WDA 16.12.8, iOS 26.5)
+
+Same iPhone SE 3, driven through the `quadcontrol-ios` stack from a macOS host.
+Numbers below supersede the August ones where they differ.
+
+| Capability | Result |
+|---|---|
+| `ios tunnel start --userspace --udid=U` | info HTTP server up immediately; device tunnel `negotiated` **~1.1 s later**. Readiness = `GET /tunnels` lists the UDID, not "port is listening" |
+| Tunnel discovery | without `--tunnel-info-port`, `runwda` / `forward` / `tunnel ls` attach to the **most recently registered** agent on the host, even on another port. A second tunnel process on the host therefore hijacks a session; pass the port explicitly to every subcommand |
+| `ios runwda` → `GET /status` 200 | **1.6 s** |
+| MJPEG (`mjpegServerFramerate` 15, quality 50) | 750×1334 JPEG, ~87 KB/frame, **41 frames in 3 s ≈ 13.7 fps** |
+| MJPEG server handshake | pushes **nothing** until it receives an HTTP request line; header is `HTTP/1.0 200 OK`, `Content-Type: multipart/x-mixed-replace; boundary=--BoundaryString` (the boundary value itself carries `--`), parts use `Content-type: image/jpeg` + `Content-Length` |
+| `element/active` | **`GET`** works; `POST` returns `unknown command / Unhandled endpoint` on this WDA build (the August note used POST) |
+| setValue + read-back | `hello123` written to the Spotlight field, `attribute/value` read back identical |
+| `wda/keys` | **delivered this time** (`zz` appended in Spotlight). Contradicts August; treat it as unreliable, not as broken. The client keeps using setValue |
+| Locked screen, MJPEG | keeps streaming: 41 black frames in 3 s (~20 KB each). No frame-rate signal for lock state |
+| Locked screen, `/screenshot` | 13 KB valid PNG, all black, no error |
+| Locked screen, tap | returns success, no effect |
+| `wda/unlock` on a passcode device | blocks **~8 s**, then HTTP 500 `Timed out while waiting until the screen is unlocked`; `/wda/locked` stays true. The screen wakes to the passcode page, which is the intended "wake" behaviour |
+| `/wda/lock` | works; `/wda/locked` reports true within 1 s |
+
 ## Text input: use setValue, never wda/keys
 
 `POST /session/{id}/wda/keys` **returns success and the characters never
@@ -44,7 +65,7 @@ cause and is the default configuration for this project's users — so treat
 Getting the active element and setting its value works reliably:
 
 ```
-POST /session/{id}/element/active        -> element id
+GET  /session/{id}/element/active        -> element id   (POST is unhandled on WDA 16.12.8)
 POST /session/{id}/element/{id}/value    -> {"value":["192.0.2.7"]}
 ```
 
