@@ -8,21 +8,35 @@ mod fake_wda;
 use fake_wda::{FakeWda, FakeWdaConfig};
 use quadcontrol_ios::session::{
     shutdown_all, spawn_supervised, ExitReason, IosLaunchOptions, IosSessionHandle,
-    IosSessionStatus, LaunchMode, WdaIds, IOS_SHUTDOWN_DEADLINE,
+    IosSessionStatus, LaunchMode, IOS_SHUTDOWN_DEADLINE,
 };
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+// 只有 Launch 模式的用例（`cfg(unix)`）用得到这些；windows 上它们会被判成未使用。
+#[cfg(unix)]
+use quadcontrol_ios::session::WdaIds;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU16, Ordering};
 
 /// 假 UDID：**绝不出现真实设备标识**（红线）。
 const FAKE_UDID: &str = "REDACTEDSERIAL-0001";
 
 /// re-exec 辅助进程的环境变量标记，值是 PID 落盘目录。
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
 const CHILD_HARNESS_MARKER: &str = "QUADCONTROL_IOS_PDEATHSIG_PID_DIR";
 
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
 fn helper() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ios-test-helper"))
 }
@@ -36,8 +50,16 @@ fn helper() -> PathBuf {
 /// 合成上游抢走，于是本该正常启动的会话报 `TunnelPortBusy`——实测就是这样偶发
 /// 失败的。这里改用一段固定的高位私有区间 + 原子计数，每个用例拿到互不相同、
 /// 且不在临时端口池里的号，再确认它确实空闲。
+///
+/// 这个端口现在有**两重**作用：启动前的「是否被占」预检要求它空闲，而假
+/// `tunnel start` 随后会**真的绑上它**——会话正是靠「绑不上了」判定隧道就绪。
+/// 所以这里返回的号必须此刻空闲、且不会被别人抢走，两个条件缺一不可。
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
 fn unique_tunnel_port() -> u16 {
-    /// 高于 macOS / Linux 的临时端口范围，避开被 bind 0 分配到的可能。
+    /// 低于 macOS / Linux 的临时端口范围，避开被 bind 0 分配到的可能。
     const BASE: u16 = 28200;
     static NEXT: AtomicU16 = AtomicU16::new(0);
     for _ in 0..200 {
@@ -50,11 +72,45 @@ fn unique_tunnel_port() -> u16 {
     panic!("找不到空闲的假隧道信息端口");
 }
 
+/// 起会话，遇到 `tunnel_port_busy` 就换个端口重试。
+///
+/// 为什么需要：`unique_tunnel_port` 只能保证「取号那一刻空闲」，而假 `tunnel start`
+/// 现在会**真的长期持有**这个端口（S3）。取号与会话内部的占用预检之间存在窗口——
+/// 上一轮测试残留的隧道进程恰好在这段时间里退出/仍在，都会让预检判成被占。
+/// 实测 8 轮里复现 1 次，所以这里直接重试，而不是把偶发失败留给 CI。
+///
+/// 只对 `tunnel_port_busy` 重试；其它错误原样抛出，免得把真故障掩盖掉。
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
+fn spawn_with_port_retry(options: &IosLaunchOptions, id: u64) -> IosSessionHandle {
+    let mut attempt = options.clone();
+    for _ in 0..10 {
+        match spawn_supervised(&attempt, id) {
+            Ok(handle) => return handle,
+            Err(error) if error.code() == "tunnel_port_busy" => {
+                attempt.tunnel_info_port = unique_tunnel_port();
+            }
+            Err(error) => panic!("起会话失败：{error}"),
+        }
+    }
+    panic!("连续 10 次都撞上被占用的假隧道信息端口");
+}
+
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
 struct Fixture {
     pid_dir: PathBuf,
     argv_log: PathBuf,
 }
 
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
 impl Fixture {
     fn new(tag: &str) -> Self {
         let base =
@@ -116,6 +172,10 @@ impl Fixture {
     }
 }
 
+// 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
+// （windows 上 Launch 直接返回 `windows_session_unsupported`）。
+// 不加这个 gate，交叉 clippy 会把它判成 dead_code。
+#[cfg(unix)]
 fn launch_options(
     fixture: &Fixture,
     wda_port: u16,
@@ -210,14 +270,11 @@ fn synthetic_mjpeg() -> u16 {
     port
 }
 
-fn wait_for_running(handle: &IosSessionHandle) -> (u16, u16) {
+fn wait_for_running(handle: &IosSessionHandle) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         match handle.status() {
-            IosSessionStatus::Running {
-                proxy_port,
-                http_port,
-            } => return (proxy_port, http_port),
+            IosSessionStatus::Running { proxy_port } => return proxy_port,
             IosSessionStatus::Starting => {}
             other => panic!("会话没能进入 Running：{other:?}"),
         }
@@ -258,9 +315,12 @@ fn assert_process_gone(pid: u32) {
 /// windows 版判据，与 `quadcontrol-android/tests/supervised.rs` 同一套：
 /// 打不开句柄说明进程已走；打得开就看退出码不是 `STILL_ACTIVE`(259)。
 ///
-/// 这个分支不是摆设——本机交叉 `cargo check --target x86_64-pc-windows-gnu`
-/// 时，缺了它整个 test target 编译不过。
+/// 目前**没有调用方**：检查 PID 的用例都属于 Launch 模式，而 Launch 在 windows 上
+/// 按方案直接被拒（P6 才做进程树回收）。刻意保留并 `allow(dead_code)` 而不是删掉：
+/// P6 打开 windows Launch 时需要的就是这段判据，且留着能让它持续参与交叉编译，
+/// 不至于到那时才发现写错了。
 #[cfg(windows)]
+#[allow(dead_code)]
 fn assert_process_gone(pid: u32) {
     unsafe {
         let handle = windows_sys::Win32::System::Threading::OpenProcess(
@@ -295,8 +355,8 @@ fn launch_then_stop_leaves_no_orphans() {
     let mjpeg = synthetic_mjpeg();
     let options = launch_options(&fixture, wda.port, mjpeg, &[]);
 
-    let handle = spawn_supervised(&options, 1).unwrap();
-    let (proxy_port, _http_port) = wait_for_running(&handle);
+    let handle = spawn_with_port_retry(&options, 1);
+    let proxy_port = wait_for_running(&handle);
     assert!(proxy_port > 0);
     let pids = fixture.pids(4);
     assert_eq!(pids.len(), 4, "应当正好四个子进程：tunnel/runwda/forward×2");
@@ -343,7 +403,7 @@ fn stop_beats_the_deadline_even_when_every_child_ignores_sigint() {
         &[("QUADCONTROL_FAKE_IGNORE_SIGINT", "1".to_owned())],
     );
 
-    let handle = spawn_supervised(&options, 2).unwrap();
+    let handle = spawn_with_port_retry(&options, 2);
     wait_for_running(&handle);
     let pids = fixture.pids(4);
 
@@ -355,6 +415,13 @@ fn stop_beats_the_deadline_even_when_every_child_ignores_sigint() {
     assert!(
         matches!(status, IosSessionStatus::Exited { .. }),
         "{status:?}"
+    );
+    // 下界：SIGINT 被全部忽略，梯子**必须**等满 3 s 才升级到 SIGTERM。
+    // 没有这条断言，「子进程其实没忽略 SIGINT」这类替身失效会让用例假通过——
+    // 本机就踩过一次（macOS 的 /bin/sh trap 不生效）。
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "只用了 {elapsed:?}：子进程没有真的忽略 SIGINT，这条用例没测到梯子"
     );
     assert!(
         elapsed < IOS_SHUTDOWN_DEADLINE,
@@ -388,7 +455,7 @@ fn runwda_immediate_failure_maps_to_a_stable_code() {
             &[("QUADCONTROL_FAKE_RUNWDA_STDERR", stderr.to_owned())],
         );
 
-        let handle = spawn_supervised(&options, 3).unwrap();
+        let handle = spawn_with_port_retry(&options, 3);
         let status = wait_for_settled(&handle, Duration::from_secs(30));
         assert_eq!(
             status,
@@ -424,7 +491,7 @@ fn status_budget_expiry_reports_wda_unreachable() {
         status_budget: Duration::from_secs(2),
     };
 
-    let handle = spawn_supervised(&options, 4).unwrap();
+    let handle = spawn_with_port_retry(&options, 4);
     let status = wait_for_settled(&handle, Duration::from_secs(20));
     assert_eq!(
         status,
@@ -467,8 +534,8 @@ fn attach_mode_runs_without_any_child_process() {
     );
 
     let handle = spawn_supervised(&options, 6).unwrap();
-    let (proxy_port, http_port) = wait_for_running(&handle);
-    assert_eq!(http_port, wda.port);
+    // `Running` 只带代理端口：WebView 只连代理，WDA 的 HTTP 端口不对外暴露。
+    let proxy_port = wait_for_running(&handle);
     assert!(proxy_port > 0);
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -507,7 +574,7 @@ fn a_dying_child_takes_the_whole_session_down() {
     let mjpeg = synthetic_mjpeg();
     let options = launch_options(&fixture, wda.port, mjpeg, &[]);
 
-    let handle = spawn_supervised(&options, 7).unwrap();
+    let handle = spawn_with_port_retry(&options, 7);
     wait_for_running(&handle);
     let pids = fixture.pids(4);
 
@@ -528,6 +595,109 @@ fn a_dying_child_takes_the_whole_session_down() {
         "{status:?}"
     );
     // 其余进程一并被收回。
+    for pid in pids {
+        assert_process_gone(pid);
+    }
+}
+
+/// 梯子的**最坏路径**：四个子进程同时忽略 SIGINT 与 SIGTERM，只有 SIGKILL 收得走。
+///
+/// 这是关闭预算最容易被突破的场景：SIGINT 等 3 s + SIGTERM 等 2 s 全部白等，
+/// 之后才 SIGKILL。墙钟必须仍然装进 `IOS_SHUTDOWN_DEADLINE`（7 s）。
+#[test]
+// Launch 模式在 windows 上按方案直接返回 `windows_session_unsupported`
+// （没有 Job Object 收不回进程树，P6 再做），所以这些用例只在 unix 上跑。
+#[cfg(unix)]
+fn stop_beats_the_deadline_when_children_ignore_sigint_and_sigterm() {
+    let fixture = Fixture::new("ignore-both");
+    let wda = FakeWda::start(FakeWdaConfig::healthy());
+    let mjpeg = synthetic_mjpeg();
+    let options = launch_options(
+        &fixture,
+        wda.port,
+        mjpeg,
+        &[
+            ("QUADCONTROL_FAKE_IGNORE_SIGINT", "1".to_owned()),
+            ("QUADCONTROL_FAKE_IGNORE_SIGTERM", "1".to_owned()),
+        ],
+    );
+
+    let handle = spawn_with_port_retry(&options, 70);
+    wait_for_running(&handle);
+    let pids = fixture.pids(4);
+
+    let started = Instant::now();
+    handle.request_stop().unwrap();
+    let status = wait_for_settled(&handle, Duration::from_secs(20));
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(status, IosSessionStatus::Exited { .. }),
+        "{status:?}"
+    );
+    // 两级温和信号都被忽略：至少要等满 3 s + 2 s 才会 SIGKILL。
+    assert!(
+        elapsed >= Duration::from_secs(5),
+        "只用了 {elapsed:?}：子进程没有真的同时忽略 SIGINT 与 SIGTERM"
+    );
+    assert!(
+        elapsed < IOS_SHUTDOWN_DEADLINE,
+        "最坏路径停止用了 {elapsed:?}，超出 {IOS_SHUTDOWN_DEADLINE:?}"
+    );
+    for pid in pids {
+        assert_process_gone(pid);
+    }
+}
+
+/// 启动阶段（`Starting`）收到停止请求 → 干净的 `Exited { Requested }`。
+///
+/// **不是** `Failed { wda_unreachable }`：用户自己点了断开，界面不该再弹一个
+/// 「WDA 不可达」的故障。这里把 `/status` 永远不通（8100 没有上游）和一个短预算
+/// 组合起来，确保会话确实停在 `Starting`，然后在预算耗尽前请求停止。
+#[test]
+// Launch 模式在 windows 上按方案直接返回 `windows_session_unsupported`
+// （没有 Job Object 收不回进程树，P6 再做），所以这些用例只在 unix 上跑。
+#[cfg(unix)]
+fn stopping_while_starting_exits_cleanly() {
+    let fixture = Fixture::new("stop-while-starting");
+    let mjpeg = synthetic_mjpeg();
+    // 刻意**不配** FORWARD_8100：`/status` 永远不通，会话会一直停在 Starting。
+    let mut env = fixture.env(&[]);
+    env.push(("QUADCONTROL_FAKE_FORWARD_9100".into(), mjpeg.to_string()));
+    let options = IosLaunchOptions {
+        udid: FAKE_UDID.to_owned(),
+        mode: LaunchMode::Launch {
+            ios: helper(),
+            wda: WdaIds {
+                bundle_id: "com.example.wda".into(),
+                testrunner_id: "com.example.wda.xctrunner".into(),
+                xctestconfig: "WebDriverAgentRunner.xctest".into(),
+            },
+            env,
+        },
+        tunnel_info_port: unique_tunnel_port(),
+        status_budget: Duration::from_secs(30),
+    };
+
+    let handle = spawn_with_port_retry(&options, 71);
+    // 刚返回时必然是 Starting，这个断言没有竞态。
+    assert_eq!(handle.status(), IosSessionStatus::Starting);
+
+    // 等四个子进程都起来（为后面的无孤儿断言取 PID）。这里**不再**复查
+    // 「仍是 Starting」：那是个时间点判断，并发跑时曾偶发失败。会话是否真的停在
+    // Starting 由下面的结局断言保证——`/status` 永远不通（8100 没有上游），
+    // 30 s 预算内它不可能自己变成 Running，所以只要结局是 Exited{Requested}，
+    // 就说明停止请求确实是在启动阶段被处理的。
+    let pids = fixture.pids(4);
+
+    handle.request_stop().unwrap();
+    assert_eq!(
+        wait_for_settled(&handle, IOS_SHUTDOWN_DEADLINE + Duration::from_secs(3)),
+        IosSessionStatus::Exited {
+            reason: ExitReason::Requested
+        },
+        "启动阶段被用户停止应当是干净退出，不是故障"
+    );
     for pid in pids {
         assert_process_gone(pid);
     }
@@ -617,7 +787,7 @@ fn every_flag_we_pass_appears_in_the_real_usage_fixture() {
     let wda = FakeWda::start(FakeWdaConfig::healthy());
     let mjpeg = synthetic_mjpeg();
     let options = launch_options(&fixture, wda.port, mjpeg, &[]);
-    let handle = spawn_supervised(&options, 40).unwrap();
+    let handle = spawn_with_port_retry(&options, 40);
     wait_for_running(&handle);
     handle.request_stop().unwrap();
     wait_for_settled(&handle, IOS_SHUTDOWN_DEADLINE + Duration::from_secs(3));

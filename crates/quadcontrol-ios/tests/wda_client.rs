@@ -84,6 +84,33 @@ fn send_text_reports_unconfirmed_when_the_read_back_differs() {
     }
 }
 
+/// 空串没有可核验的效果，直接挡住，而不是走到一个让人困惑的 `text_unconfirmed`。
+#[test]
+fn send_text_rejects_an_empty_string() {
+    let (server, client) = connected(FakeWdaConfig::healthy());
+    assert_eq!(
+        client.send_text("").unwrap_err().code(),
+        "wda_session_failed"
+    );
+    // 一个请求都不该发出去。
+    assert!(!server.saw("element/active"), "空串不该触碰设备");
+}
+
+/// 锁定时不转发文字（与 `tap` 一致）：锁屏下文字不会送达，而 WDA 不报错。
+#[test]
+fn send_text_is_refused_while_locked() {
+    let (server, client) = connected(FakeWdaConfig {
+        locked: true,
+        ..FakeWdaConfig::healthy()
+    });
+    assert_eq!(
+        client.send_text("hello").unwrap_err().code(),
+        "device_locked"
+    );
+    // 锁定时连取聚焦元素都不该做。
+    assert!(!server.saw("element/active"), "锁定时不该触碰设备");
+}
+
 /// 唤醒的效果核验 = 调前调后对比 `locked`。
 #[test]
 fn wake_unlocks_and_verifies_the_effect() {

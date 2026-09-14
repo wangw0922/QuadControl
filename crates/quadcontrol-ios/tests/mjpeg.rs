@@ -232,18 +232,113 @@ fn newest_downstream_wins() {
     let mut second = connect_downstream(proxy.local_port());
     assert_eq!(read_one_frame(&mut second), 1024);
 
-    // 旧连接应当被关掉：读到 EOF 或报错，总之不会再有完整帧源源不断。
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut scratch = [0u8; 4096];
+    // 旧连接必须在 2 s 内读到**干净的 EOF**（`Ok(0)`）。
+    //
+    // 刻意不接受 `Err(_)`：读超时也是 Err，把它算成「已关闭」等于让「其实没关、
+    // 只是没数据」冒充通过。要的就是 FIN，不是「读不到东西」。
+    drain_until_eof(
+        &mut first,
+        Duration::from_secs(2),
+        "新下游连上后旧连接没有被关闭",
+    );
+}
+
+/// 在 `budget` 内把流读到干净 EOF（`Ok(0)`）；读超时或出错都算失败。
+fn drain_until_eof(reader: &mut BufReader<TcpStream>, budget: Duration, message: &str) {
+    reader
+        .get_ref()
+        .set_read_timeout(Some(budget))
+        .expect("设置读超时失败");
+    let deadline = Instant::now() + budget;
+    let mut scratch = [0u8; 16 * 1024];
     loop {
-        match first.read(&mut scratch) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => assert!(
-                Instant::now() < deadline,
-                "新下游连上后旧连接还在源源不断收帧"
-            ),
+        match reader.read(&mut scratch) {
+            Ok(0) => return,
+            Ok(_) => assert!(Instant::now() < deadline, "{message}（仍在源源不断收数据）"),
+            Err(error) => panic!("{message}：读失败而不是 EOF（{error}）"),
         }
     }
+}
+
+/// 下游**先连上、隔 100 ms 才发 GET**，仍须及时拿到响应头。
+///
+/// 这条挡的是 accept 继承 O_NONBLOCK 的坑：listener 是非阻塞的，而 macOS/BSD 的
+/// accept 让新 socket 继承这个标志（Linux 不继承）。若不显式 `set_nonblocking(false)`，
+/// 写线程读请求头时会拿到 `WouldBlock` 并当成失败关掉连接——WebKit 只要稍慢发 GET
+/// 就永远得不到画面。原来的用例都是连上立刻发 GET，恰好躲开了这个窗口。
+#[test]
+fn delayed_request_still_gets_a_response_head() {
+    let (upstream, _) = synthetic_upstream(vec![vec![7u8; 1024]], true, true);
+    let proxy = Proxy::start(upstream).unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", proxy.local_port())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    // 关键：先沉默 100 ms，再发请求。
+    thread::sleep(Duration::from_millis(100));
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("延迟发 GET 之后 1 s 内没收到响应头（accept 继承了 O_NONBLOCK？）");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+}
+
+/// 慢下游（连上但不读）必须在 2 s 内**要么被断开、要么仍有帧在产出**，不能挂死。
+///
+/// 「挂住」是最难查的失败模式：既没有 EOF 也没有帧，看起来像还连着。这条用例把它
+/// 变成一次明确的失败。
+#[test]
+fn slow_downstream_does_not_wedge_the_proxy() {
+    let (upstream, _) = synthetic_upstream(vec![vec![1u8; 256 * 1024]; 4], true, true);
+    let proxy = Proxy::start(upstream).unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", proxy.local_port())).unwrap();
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    // 不读，让下游写阻塞。
+    let frames_before = proxy.stats().frames;
+
+    thread::sleep(Duration::from_secs(2));
+
+    // 要么下游已被断开（读到 EOF / 出错），要么上游仍在计帧——两者都说明代理没卡死。
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut scratch = [0u8; 1024];
+    let downstream_closed = matches!(stream.read(&mut scratch), Ok(0));
+    let still_producing = proxy.stats().frames > frames_before;
+    assert!(
+        downstream_closed || still_producing,
+        "慢下游把代理卡死了：既没断开也没有新帧（{:?}）",
+        proxy.stats()
+    );
+}
+
+/// 没有任何下游时，帧被覆盖**不算**背压丢帧。
+///
+/// `backpressure_drops` 是给「画面卡是因为下游慢」用的诊断量。GUI 还没连上来时帧
+/// 当然会在单槽里被覆盖，那是正常空转；照计会让这个指标在最常见的场景里虚高。
+#[test]
+fn no_downstream_means_no_backpressure_drops() {
+    let (upstream, _) = synthetic_upstream(vec![vec![2u8; 1024]; 4], true, true);
+    let proxy = Proxy::start(upstream).unwrap();
+
+    // 一个下游都不连，等上游吐足够多的帧（必然发生覆盖）。
+    wait_for_frames(&proxy, 8);
+
+    let stats = proxy.stats();
+    assert!(stats.frames >= 8, "{stats:?}");
+    assert_eq!(
+        stats.backpressure_drops, 0,
+        "没有下游时不应记背压丢帧：{stats:?}"
+    );
 }
 
 #[test]
@@ -255,14 +350,12 @@ fn stop_closes_the_downstream_connection() {
 
     proxy.stop();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut scratch = [0u8; 4096];
-    loop {
-        match reader.read(&mut scratch) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => assert!(Instant::now() < deadline, "stop() 之后下游连接没有关闭"),
-        }
-    }
+    // 同样要求干净 EOF：`stop()` 必须真的把下游连接关掉，而不是停止供帧就算完。
+    drain_until_eof(
+        &mut reader,
+        Duration::from_secs(2),
+        "stop() 之后下游连接没有关闭",
+    );
     // 停掉之后监听端口也不该再接受连接。
     thread::sleep(Duration::from_millis(100));
     assert!(

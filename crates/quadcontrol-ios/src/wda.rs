@@ -220,6 +220,16 @@ impl Client {
     /// 安全输入框（密码框）回读为空是**正常**的，同样会走到 `TextUnconfirmed`——
     /// 这是可接受的假阳性：宁可让用户去手机上核对，也不要谎称送达。
     pub fn send_text(&self, text: &str) -> Result<(), Error> {
+        // 空串没有可核验的效果：回读永远「不含」空串之外的东西，送不送都一样，
+        // 只会走到一个让人困惑的 `TextUnconfirmed`。直接挡住。
+        if text.is_empty() {
+            return Err(Error::WdaSessionFailed("empty text".into()));
+        }
+        // 与 `tap` 一致：锁定时不转发。锁屏下文字不会送达，而 WDA 不会报错
+        // （静默失败之一），照发只会得到一个假的「已发送」。
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
         let session = self.session()?;
         let active = self.post(
             &format!("/session/{session}/element/active"),

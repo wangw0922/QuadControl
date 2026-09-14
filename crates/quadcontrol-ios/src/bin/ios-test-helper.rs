@@ -12,8 +12,13 @@
 //! - `QUADCONTROL_FAKE_ARGV_LOG`：把本次收到的 argv 追加写到该文件（供语法断言）。
 //! - `QUADCONTROL_FAKE_PID_DIR`：把各子命令的 PID 写成 `<dir>/<子命令>.pid`。
 //! - `QUADCONTROL_FAKE_IGNORE_SIGINT=1`：长驻子命令忽略 SIGINT（测并行梯子）。
+//! - `QUADCONTROL_FAKE_IGNORE_SIGTERM=1`：再忽略 SIGTERM，只有 SIGKILL 收得走
+//!   （梯子的最坏路径）。
 //! - `QUADCONTROL_FAKE_RUNWDA_STDERR`：`runwda` 立刻把它打到 stderr 并退出。
 //! - `QUADCONTROL_FAKE_FORWARD_<targetPort>`：该目标端口要转发到的本机上游端口。
+//!
+//! `tunnel start` 还会**真的绑上** `--tunnel-info-port`：会话用「该端口是否被占」
+//! 作为隧道就绪判据，替身不绑就永远起不来（见 [`run_tunnel`]）。
 
 use std::io::Write;
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -39,7 +44,7 @@ fn main() {
             eprint!("{}", fixture("ios-list-empty.stderr.jsonl"));
             println!("{}", fixture("ios-list-empty.stdout.json"));
         }
-        ["tunnel", "start", ..] => run_forever("tunnel"),
+        ["tunnel", "start", ..] => run_tunnel(&args),
         ["runwda", ..] => run_wda(),
         ["forward", host_port, target_port, ..] => run_forward(host_port, target_port),
         _ => {
@@ -88,22 +93,56 @@ fn write_pid(name: &str) {
     }
 }
 
-/// 按环境变量忽略 SIGINT，用来构造「温和信号无效、必须升级」的场景。
+/// 按环境变量忽略温和信号，用来构造「必须升级到下一级」的场景。
+///
+/// 同时忽略 SIGINT 与 SIGTERM 时，只有 SIGKILL 能收走这些进程——那是终止梯子的
+/// 最坏路径，也是关闭预算最容易被突破的地方。
 #[cfg(unix)]
-fn maybe_ignore_sigint() {
+fn maybe_ignore_signals() {
     if std::env::var("QUADCONTROL_FAKE_IGNORE_SIGINT").as_deref() == Ok("1") {
         unsafe {
             libc::signal(libc::SIGINT, libc::SIG_IGN);
         }
     }
+    if std::env::var("QUADCONTROL_FAKE_IGNORE_SIGTERM").as_deref() == Ok("1") {
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+    }
 }
 #[cfg(not(unix))]
-fn maybe_ignore_sigint() {}
+fn maybe_ignore_signals() {}
 
 /// 长驻直到被信号打死。
 fn run_forever(name: &str) -> ! {
-    maybe_ignore_sigint();
+    maybe_ignore_signals();
     write_pid(name);
+    loop {
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `tunnel start`：**真的绑上** `--tunnel-info-port`，再长驻。
+///
+/// 必须真绑：会话在起 runwda 之前会轮询「该端口是否已被占用」来判断隧道就绪。
+/// 替身若只是发呆，那个判据永远不成立，Launch 模式就再也起不来了——这也正是
+/// 「符号存在 ≠ 真的产生效果」在测试替身上的体现。
+fn run_tunnel(args: &[String]) -> ! {
+    maybe_ignore_signals();
+    let port = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--tunnel-info-port="))
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(0);
+    let _listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("ios-test-helper: tunnel could not bind {port}: {error}");
+            std::process::exit(1);
+        }
+    };
+    // PID 在**绑定之后**才落盘：这样测试看到 PID 就意味着端口已经在听。
+    write_pid("tunnel");
     loop {
         thread::sleep(Duration::from_millis(50));
     }
@@ -125,7 +164,7 @@ fn run_wda() -> ! {
 /// HTTP 服务和合成 MJPEG 上游）。没配上游就只监听不转发——用来模拟「端口通了但
 /// 后面没有服务」。
 fn run_forward(host_port: &str, target_port: &str) -> ! {
-    maybe_ignore_sigint();
+    maybe_ignore_signals();
     write_pid(&format!("forward-{target_port}"));
 
     let listener = match TcpListener::bind(("127.0.0.1", host_port.parse::<u16>().unwrap_or(0))) {

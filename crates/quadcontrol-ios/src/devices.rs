@@ -11,10 +11,23 @@
 ///
 /// `id` 是完整 UDID，只在进程内流转；`name` 是给界面看的短名。
 /// **两者都不持久化**（红线：设备标识不入仓库、不落盘）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct IosDevice {
     pub id: String,
     pub name: String,
+}
+
+/// 手写 `Debug`：`id` 只打尾四位。
+///
+/// 完整 UDID 是设备标识，而 `Debug` 输出会顺着日志、panic 消息、`unwrap` 的错误
+/// 一路漏出去——那是最容易被忽略的泄漏路径。要完整值的地方直接读 `.id`。
+impl std::fmt::Debug for IosDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IosDevice")
+            .field("id", &short_ios_name(&self.id))
+            .field("name", &self.name)
+            .finish()
+    }
 }
 
 /// 解析 `ios list` 的 stdout。
@@ -134,6 +147,23 @@ mod tests {
     #[test]
     fn ignores_non_matching_json_shape() {
         assert!(extract_device_list(r#"{"other":[1]}"#).is_none());
+    }
+
+    /// `Debug` 不能带出完整 UDID——这条钉住脱敏，改坏了会红。
+    #[test]
+    fn debug_redacts_the_full_udid() {
+        let device = IosDevice {
+            id: "REDACTEDSERIAL0001".into(),
+            name: short_ios_name("REDACTEDSERIAL0001"),
+        };
+        let rendered = format!("{device:?}");
+        assert!(
+            !rendered.contains("REDACTEDSERIAL0001"),
+            "Debug 漏出了完整 UDID：{rendered}"
+        );
+        assert!(rendered.contains("0001"), "应当保留尾四位：{rendered}");
+        // 完整值仍可从字段本身取到，脱敏只作用在诊断输出上。
+        assert_eq!(device.id, "REDACTEDSERIAL0001");
     }
 
     #[test]

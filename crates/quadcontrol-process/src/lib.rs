@@ -188,8 +188,16 @@ pub fn wait_for(child: &mut Child, timeout: Duration, escalated: &dyn Fn() -> bo
 /// 与进程数无关。iOS 会话同时持有 tunnel / runwda / forward×2 四个子进程，
 /// 串行梯子会超出 `IOS_SHUTDOWN_DEADLINE`，所以必须并行。
 ///
-/// 每一级下手前都跳过已经收尸的子进程：PID 会被复用，对已 reap 的 PID 再发信号
-/// 有误伤别人的风险。
+/// 每一级都对**全部**子进程的进程组发信号，**不跳过**已经收尸的组长。理由是
+/// 组长（直接子进程）死了不等于组里没进程了：go-ios 会拉起辅助进程，它们可能活得
+/// 比组长久，只有对着整个进程组发信号才收得回来——跳过就正好把这些孤儿漏掉。
+///
+/// 这样做不会误伤别人：POSIX 保证一个 PID **在它仍被用作进程组 ID 期间不会被复用**，
+/// 而只要组里还有进程，这个组 ID 就仍在使用；组真的空了，`kill(-pgid)` 返回 `ESRCH`
+/// 而已，无害。（对**单个已 reap 的 PID** 发信号才有复用风险，那是 `kill(pid)`，
+/// 不是这里的 `kill(-pgid)`。）
+///
+/// 跳过已退出者的只有 [`wait_all_for`]：它等的是「进程是否可收尸」，那确实该跳过。
 ///
 /// `escalated` 的语义与 [`terminate`] 完全一致：实时求值，一旦升级就跳过剩余的
 /// 温和等待直接强制终止。windows 分支同样只有「控制台事件 → TerminateProcess」
@@ -224,6 +232,10 @@ fn wait_all_for(
 }
 
 /// 对还活着的子进程逐个执行 `action`；已退出的跳过（PID 复用防误伤）。
+///
+/// 只有 windows 的强制终止级用得上：那一级针对单个 PID。unix 侧全程对进程组发信号，
+/// 不需要也不应该跳过（见 [`terminate_all`]）。
+#[cfg(windows)]
 fn for_each_live(children: &mut [&mut Child], action: impl Fn(&Child)) {
     for child in children.iter_mut() {
         if child.try_wait().ok().flatten().is_none() {
@@ -232,24 +244,35 @@ fn for_each_live(children: &mut [&mut Child], action: impl Fn(&Child)) {
     }
 }
 
+/// 对**每个**子进程执行 `action`，不论它自己是否已经收尸。
+///
+/// 见 [`terminate_all`] 的说明：`action` 是对进程组下手，组长已死而组内仍有进程是
+/// 常态，跳过就会漏掉那些辅助进程。
+fn for_each_group(children: &mut [&mut Child], action: impl Fn(&Child)) {
+    for child in children.iter_mut() {
+        action(child);
+    }
+}
+
 #[cfg(unix)]
 fn terminate_all_impl(children: &mut [&mut Child], escalated: &dyn Fn() -> bool) -> io::Result<()> {
     fn signal_group(signal: libc::c_int) -> impl Fn(&Child) {
         move |child: &Child| unsafe {
+            // 负数 = 整个进程组。组空了返回 ESRCH，忽略即可。
             libc::kill(-(child.id() as i32), signal);
         }
     }
     if !escalated() {
-        for_each_live(children, signal_group(libc::SIGINT));
+        for_each_group(children, signal_group(libc::SIGINT));
         if wait_all_for(children, Duration::from_secs(3), escalated) {
             return Ok(());
         }
     }
-    for_each_live(children, signal_group(libc::SIGTERM));
+    for_each_group(children, signal_group(libc::SIGTERM));
     if wait_all_for(children, Duration::from_secs(2), escalated) {
         return Ok(());
     }
-    for_each_live(children, signal_group(libc::SIGKILL));
+    for_each_group(children, signal_group(libc::SIGKILL));
     for child in children.iter_mut() {
         child.wait()?;
     }
@@ -259,8 +282,11 @@ fn terminate_all_impl(children: &mut [&mut Child], escalated: &dyn Fn() -> bool)
 #[cfg(windows)]
 fn terminate_all_impl(children: &mut [&mut Child], escalated: &dyn Fn() -> bool) -> io::Result<()> {
     let has_console = unsafe { !windows_sys::Win32::System::Console::GetConsoleWindow().is_null() };
+    // 控制台事件打的是**进程组**（`CREATE_NEW_PROCESS_GROUP` 建的那个），
+    // 所以和 unix 的 `kill(-pgid)` 同理：不跳过已退出的组长，组里活得更久的
+    // 辅助进程才收得到。
     if has_console && !escalated() {
-        for_each_live(children, |child| unsafe {
+        for_each_group(children, |child| unsafe {
             let _ = windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(
                 windows_sys::Win32::System::Console::CTRL_BREAK_EVENT,
                 child.id(),
@@ -270,6 +296,9 @@ fn terminate_all_impl(children: &mut [&mut Child], escalated: &dyn Fn() -> bool)
             return Ok(());
         }
     }
+    // 这一级不同：`OpenProcess` + `TerminateProcess` 针对的是**单个 PID**，
+    // 而 windows 的 PID 会被复用——对已收尸的 PID 下手可能打到别人，所以这里
+    // 必须跳过已退出者（unix 侧没有这个分叉，因为它全程只对进程组发信号）。
     for_each_live(children, |child| unsafe {
         let handle = windows_sys::Win32::System::Threading::OpenProcess(
             windows_sys::Win32::System::Threading::PROCESS_TERMINATE,
@@ -362,12 +391,91 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
-    /// 空切片与已退出的子进程都不应 panic，也不应对回收过的 PID 再发信号。
+    /// 空切片与已退出的子进程都不应 panic。
+    ///
+    /// 注意语义：已退出的组长**不再被跳过**（每一级都对整个进程组发信号，组空了
+    /// `kill(-pgid)` 得 ESRCH，无害）。这条用例钉的是「不 panic、不报错」，
+    /// 而不是「不发信号」。
     #[test]
-    fn already_exited_children_are_skipped() {
+    fn already_exited_children_do_not_break_the_ladder() {
         let mut child = Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         terminate_all(&mut [&mut child], &|| false).unwrap();
         terminate_all(&mut [], &|| false).unwrap();
+    }
+
+    /// 组长已经收尸的那个进程组，**仍然**要收到梯子后续各级的信号。
+    ///
+    /// 这正是「不跳过已退出的组长」要解决的场景：go-ios 会拉起辅助进程，它们可能
+    /// 活得比组长久。这里第一个子进程是「组长秒退、组内留一个忽略 SIGINT/SIGTERM
+    /// 的孙子」，第二个子进程忽略 SIGINT/SIGTERM 以**驱动梯子升级到 SIGKILL**；
+    /// 断言孙子最终被收回。
+    ///
+    /// 已知边界（见 [`terminate_all`] 的实现）：梯子的完成判据是「所有**直接**子进程
+    /// 可收尸」。若每个直接子进程都已收尸，`wait_all_for` 在第一级就返回，梯子不再
+    /// 升级，这类组内残留就不会被追杀。要覆盖那种情况得改成等「进程组为空」，
+    /// 那是另一个语义，不在本次范围内。
+    #[test]
+    fn a_dead_leaders_group_still_receives_the_escalated_signals() {
+        use std::os::unix::process::CommandExt;
+
+        let pid_file = std::env::temp_dir().join(format!("qc-process-group-{}.pid", unsafe {
+            libc::getpid()
+        }));
+        let _ = std::fs::remove_file(&pid_file);
+
+        // 组长：把一个同组孙子的 PID 落盘后自己立刻退出。
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 30 & echo $! > {}; exit 0",
+                pid_file.to_string_lossy()
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_process(&mut command).unwrap();
+        // 孙子继承 SIG_IGN：保证它只可能被 SIGKILL 收走，不是被温和信号顺手带走。
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        leader.wait().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let grandchild = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "孙子进程没有落盘 PID");
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        // 第二个子进程忽略两种温和信号，逼梯子一路升级到 SIGKILL。
+        let mut stubborn = spawn_ignoring(&[libc::SIGINT, libc::SIGTERM]);
+
+        terminate_all(&mut [&mut leader, &mut stubborn], &|| false).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let gone = unsafe { libc::kill(grandchild as libc::pid_t, 0) } == -1;
+            if gone {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "组长已收尸的那个组没收到信号，孙子进程 {grandchild} 成了孤儿"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_file(&pid_file);
     }
 }

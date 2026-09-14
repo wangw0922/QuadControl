@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// 下游响应用的 multipart 边界。固定值即可：每条下游连接各自独立。
 const DOWNSTREAM_BOUNDARY: &str = "quadcontrolframe";
-/// `stop()` 时等待各线程收尾的上限；绝不无界 join。
+/// `stop()` 里「还要不要 join 下一个线程」的总预算；语义见 [`Proxy::stop`]。
 const JOIN_BUDGET: Duration = Duration::from_secs(2);
 /// accept 循环的轮询间隔（listener 设为非阻塞，靠它感知停止标志）。
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
@@ -64,13 +64,29 @@ struct Slot {
     drops: AtomicU64,
     last_frame_at: Mutex<Option<Instant>>,
     stopping: AtomicBool,
+    /// 当前活跃的下游写线程数。
+    writers: AtomicU64,
+}
+
+/// 写线程退出时把 [`Slot::writers`] 减回去，panic 路径也不漏。
+struct WriterGuard<'a> {
+    slot: &'a Arc<Slot>,
+}
+impl Drop for WriterGuard<'_> {
+    fn drop(&mut self) {
+        self.slot.writers.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Slot {
     fn publish(&self, frame: Vec<u8>) {
         let mut held = self.frame.lock().expect("frame mutex poisoned");
-        // 槽里还压着上一帧 = 下游没跟上，覆盖并记一次丢帧。
-        if held.is_some() {
+        // 槽里还压着上一帧 = 有人在消费但没跟上，覆盖并记一次背压丢帧。
+        //
+        // **没有下游时不计**：`backpressure_drops` 是给「画面卡是因为下游慢」用的
+        // 诊断量。GUI 还没连上来（或用户已断开）时帧当然会在槽里被覆盖，那是正常
+        // 的空转，不是背压；照计只会让这个指标在最常见的场景里虚高到没法用。
+        if held.is_some() && self.writers.load(Ordering::Acquire) > 0 {
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
         *held = Some(frame);
@@ -143,6 +159,7 @@ impl Proxy {
             drops: AtomicU64::new(0),
             last_frame_at: Mutex::new(None),
             stopping: AtomicBool::new(false),
+            writers: AtomicU64::new(0),
         });
         let failure = Arc::new(Mutex::new(None));
         let sockets = Arc::new(Mutex::new(vec![upstream.try_clone().map_err(|e| {
@@ -206,10 +223,16 @@ impl Proxy {
             .map(Error::ProxyFailed)
     }
 
-    /// 关监听、断上下游、有界 join 全部线程。
+    /// 关监听、断上下游、join 全部线程。
     ///
     /// accept 与 read 都可能正阻塞着，所以先置停止标志并 `shutdown` 所有 socket
-    /// 把它们踢醒，再 join；join 也有预算（[`JOIN_BUDGET`]），绝不无界等待。
+    /// 把它们踢醒，再 join。
+    ///
+    /// 关于 [`JOIN_BUDGET`] 的**如实说明**：`std` 的 `JoinHandle::join` 没有超时，
+    /// 所以单次 join 一旦开始就是无界的——不卡住靠的是上面的 `shutdown`，它保证
+    /// 每个线程都已经在退出路上。这里的预算只做一件事：在**开始下一次** join 之前
+    /// 检查是否已超时，超了就不再 join 剩下的线程（它们已被 shutdown，会自行退出）。
+    /// 换句话说预算限制的是「还要不要等下一个」，不是「等当前这个多久」。
     pub fn stop(&mut self) {
         self.slot.stopping.store(true, Ordering::Release);
         self.slot.ready.notify_all();
@@ -432,6 +455,13 @@ fn serve_downstream(listener: TcpListener, slot: &Arc<Slot>, sockets: &Arc<Mutex
     while !slot.stopping.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // **必须显式转回阻塞**：listener 是非阻塞的（accept 循环靠它感知停止
+                // 标志），而 macOS/BSD 的 `accept` 让新 socket **继承** O_NONBLOCK，
+                // Linux 不继承。不改回来的话，写线程读请求头时会拿到 `WouldBlock`
+                // 并被当成失败，下游在 WebKit 稍慢发 GET 时就永远收不到响应头。
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 // 新连接获胜：先把旧的踢掉，保证同一时刻只有一条下游在写。
                 if let Some(previous) = current.take() {
                     let _ = previous.shutdown(Shutdown::Both);
@@ -466,20 +496,34 @@ fn serve_downstream(listener: TcpListener, slot: &Arc<Slot>, sockets: &Arc<Mutex
 }
 
 /// 给一条下游连接持续写帧。
+///
+/// **写线程死亡 = 连接关闭**：每一条提前 return 的路径都先 `shutdown(Both)`。
+/// 否则这条 socket 会留在「已建立但永远没人写」的状态，下游读方既拿不到帧也等不到
+/// EOF，只能一直挂着——对 WebKit 来说就是一张永不刷新、也不报错的空白图。
 fn write_downstream(mut stream: TcpStream, slot: &Arc<Slot>) {
+    // 活跃写线程计数：`publish` 靠它判断「有没有人在消费」，没有下游时不该把
+    // 压在槽里的帧记成背压丢帧（见 [`Slot::publish`]）。
+    slot.writers.fetch_add(1, Ordering::AcqRel);
+    let _guard = WriterGuard { slot };
+
     // WebKit 会发一个真正的 GET，先把请求行和头读掉再回响应，否则它会挂在那。
     {
         let mut reader = BufReader::new(match stream.try_clone() {
             Ok(clone) => clone,
-            Err(_) => return,
+            Err(_) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                return;
+            }
         });
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
-                Ok(0) => return,
+                Ok(0) | Err(_) => {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return;
+                }
                 Ok(_) if line.trim().is_empty() => break,
                 Ok(_) => {}
-                Err(_) => return,
             }
         }
     }
@@ -491,6 +535,7 @@ fn write_downstream(mut stream: TcpStream, slot: &Arc<Slot>) {
          Connection: close\r\n\r\n"
     );
     if stream.write_all(head.as_bytes()).is_err() {
+        let _ = stream.shutdown(Shutdown::Both);
         return;
     }
 
@@ -503,6 +548,7 @@ fn write_downstream(mut stream: TcpStream, slot: &Arc<Slot>) {
             || stream.write_all(&frame).is_err()
             || stream.write_all(b"\r\n").is_err()
         {
+            let _ = stream.shutdown(Shutdown::Both);
             return;
         }
     }

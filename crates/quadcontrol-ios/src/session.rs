@@ -178,9 +178,13 @@ pub enum ExitReason {
 pub enum IosSessionStatus {
     /// 子进程正在起、`/status` 还没通。
     Starting,
+    /// 只暴露**代理端口**。
+    ///
+    /// 刻意不带 WDA 的 HTTP 端口：WebView 只连代理，从不直连 go-ios 的转发端口；
+    /// 后端命令要发 tap / text / home 时走 [`IosSessionHandle::client`]。多暴露一个
+    /// 端口只会给「前端直连转发端口」这条不该存在的路留口子。
     Running {
         proxy_port: u16,
-        http_port: u16,
     },
     Stopping,
     Exited {
@@ -420,6 +424,13 @@ fn start_session(
                 env,
                 Error::TunnelFailed,
             )?);
+            // 隧道必须**先真的就绪**再起 runwda：iOS 17+ 的 runwda 要经隧道才能
+            // 到达设备服务，抢跑会得到一个含糊的 runwda 失败，把真因（隧道没起来）
+            // 藏掉。判据是隧道信息端口被绑上——那正是启动前探测「是否被占」的同一个
+            // 端口，语义前后一致。
+            if await_tunnel(options, children, stop_rx)? == Readiness::StopRequested {
+                return Ok(ExitReason::Requested);
+            }
             children.push(spawn_child(
                 ChildKind::RunWda,
                 ios,
@@ -445,7 +456,10 @@ fn start_session(
 
     // 轮询 `/status`。期间任一子进程早退要立刻分类报错，而不是干等 60 s。
     let mut client = wda::Client::new(http_port);
-    await_status(&client, children, options.status_budget, stop_rx)?;
+    if await_status(&client, children, options.status_budget, stop_rx)? == Readiness::StopRequested
+    {
+        return Ok(ExitReason::Requested);
+    }
 
     client.create_session()?;
     client.configure_mjpeg(MJPEG_FPS, MJPEG_QUALITY)?;
@@ -454,10 +468,8 @@ fn start_session(
     let proxy_port = started.local_port();
     *proxy = Some(started);
     *shared.client.lock().expect("client mutex poisoned") = Some(client);
-    *shared.status.lock().expect("status mutex poisoned") = IosSessionStatus::Running {
-        proxy_port,
-        http_port,
-    };
+    *shared.status.lock().expect("status mutex poisoned") =
+        IosSessionStatus::Running { proxy_port };
 
     run_until_stop(children, proxy, shared, stop_rx)
 }
@@ -596,25 +608,83 @@ fn set_parent_death_signal(command: &mut Command) {
 #[cfg(not(target_os = "linux"))]
 fn set_parent_death_signal(_command: &mut Command) {}
 
+/// 隧道就绪的等待预算。独立于 `status_budget`：隧道起不来是**另一个**故障，
+/// 借用 WDA 的预算会让错误码指错地方。
+pub const TUNNEL_READY_BUDGET: Duration = Duration::from_secs(10);
+
+/// 隧道信息端口上是否已经有人在监听。
+///
+/// 用 connect 而不是 bind：见 [`await_tunnel`] 里的说明——bind 探测会把端口从
+/// 被等待的子进程手里抢走。连上就立刻断开，不发任何字节。
+fn tunnel_is_listening(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+/// 有界等待隧道信息端口就绪；期间 tunnel 早退或收到停止请求都要立刻返回。
+fn await_tunnel(
+    options: &IosLaunchOptions,
+    children: &mut [SupervisedChild],
+    stop_rx: &mpsc::Receiver<StopCommand>,
+) -> Result<Readiness, Error> {
+    let deadline = Instant::now() + TUNNEL_READY_BUDGET;
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            return Ok(Readiness::StopRequested);
+        }
+        if let Some(error) = first_child_failure(children) {
+            return Err(error);
+        }
+        // 用**连接**探测，绝不能用 `port_is_free`（bind 探测）。
+        //
+        // bind 探测会真的把端口占下来再释放：它和被等待的 tunnel 子进程抢同一个端口，
+        // 正好在对方 bind 的瞬间偷走它，于是 tunnel 以 `Address already in use` 早退。
+        // 实测复现过（`ios-test-helper: tunnel could not bind 28205`）。
+        // connect 探测只读不写，不会干扰对方。
+        if tunnel_is_listening(options.tunnel_info_port) {
+            return Ok(Readiness::Ready);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::TunnelFailed(format!(
+                "`ios tunnel start` did not open its info port within {} s",
+                TUNNEL_READY_BUDGET.as_secs()
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 启动阶段的等待结果。
+///
+/// 「用户在启动过程中按了断开」**不是故障**：它要落到 `Exited { Requested }`，
+/// 和运行中停止走同一个结局。早先把它当成 `wda_unreachable` 报错，界面会在用户
+/// 自己点了断开之后弹一个「WDA 不可达」，属于误报。
+#[derive(Debug, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    StopRequested,
+}
+
 /// 轮询 `/status` 直到通、超预算、或某个子进程早退。
 fn await_status(
     client: &wda::Client,
     children: &mut [SupervisedChild],
     budget: Duration,
     stop_rx: &mpsc::Receiver<StopCommand>,
-) -> Result<(), Error> {
+) -> Result<Readiness, Error> {
     let deadline = Instant::now() + budget;
     loop {
         if stop_rx.try_recv().is_ok() {
-            return Err(Error::WdaUnreachable(
-                "the session was stopped before WDA became ready".into(),
-            ));
+            return Ok(Readiness::StopRequested);
         }
         if let Some(error) = first_child_failure(children) {
             return Err(error);
         }
         if client.status().is_ok() {
-            return Ok(());
+            return Ok(Readiness::Ready);
         }
         if Instant::now() >= deadline {
             return Err(Error::WdaUnreachable(format!(
@@ -737,7 +807,22 @@ fn shutdown(children: &mut Vec<SupervisedChild>, proxy: &mut Option<Proxy>, shar
     //    不无条件 join：go-ios 会拉起孙进程，管道可能一直不关（同 Android 的教训）。
     for child in children.iter_mut() {
         let _ = child.child.wait();
-        let _ = child.stderr_tail_settled(STDERR_SETTLE_BUDGET);
+    }
+
+    // stderr 收尾用**一份共享预算**，不是每个子进程各 200 ms。
+    // 四个子进程各等一份就是 800 ms，那是从关闭预算里白扣掉的时间，而且四条抽取
+    // 线程本来就是并行读的——等的是「最后一条读完」，不是「四条依次读完」。
+    let settle_deadline = Instant::now() + STDERR_SETTLE_BUDGET;
+    while Instant::now() < settle_deadline
+        && children
+            .iter()
+            .any(|child| !child.stderr_eof.load(Ordering::Acquire))
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    for child in children.iter_mut() {
+        // 预算已经统一等过了，这里取尾部不再等待。
+        let _ = child.stderr_tail();
         if let Some(thread) = child.stderr_thread.take() {
             if child.stderr_eof.load(Ordering::Acquire) {
                 let _ = thread.join();
