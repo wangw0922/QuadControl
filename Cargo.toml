@@ -5,6 +5,7 @@ members = [
   "crates/media", "crates/pairing", "crates/diagnostics", "crates/ffi",
   "agents/android-shell/adb-probe",
   "crates/quadcontrol-android",
+  "crates/quadcontrol-process",
 ]
 resolver = "2"
 
