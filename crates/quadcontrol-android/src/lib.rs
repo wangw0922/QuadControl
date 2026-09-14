@@ -5,9 +5,12 @@
 
 pub use adb_probe::DeviceState;
 use adb_probe::{parse_devices, CommandRunner, Device, SystemRunner};
-use std::collections::VecDeque;
+use quadcontrol_process::{configure_process, drain_stderr};
+/// 子进程通用设施住在 `quadcontrol-process`，这里按原有公开面 re-export，
+/// 外部调用方（tests、GUI）无需改 import。
+pub use quadcontrol_process::{RingBuffer, STDERR_LIMIT};
 use std::fmt;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +21,6 @@ use std::time::{Duration, Instant};
 pub mod wireless;
 
 pub const MIN_SCRCPY: (u64, u64) = (4, 1);
-pub const STDERR_LIMIT: usize = 64 * 1024;
 /// 监督会话的统一关闭预算；它覆盖终止梯子的最多 5 秒，并留出收尾余量。
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(7);
 /// 进程退出后再给 stderr 抽取线程的收尾时间，远小于关闭预算，不影响上面的期限。
@@ -356,31 +358,6 @@ pub fn build_args(options: &LaunchOptions) -> Result<Vec<String>, Error> {
     Ok(args)
 }
 
-#[derive(Debug)]
-pub struct RingBuffer {
-    bytes: VecDeque<u8>,
-    limit: usize,
-}
-impl RingBuffer {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: VecDeque::with_capacity(limit),
-            limit,
-        }
-    }
-    fn push(&mut self, data: &[u8]) {
-        for &b in data {
-            if self.bytes.len() == self.limit {
-                self.bytes.pop_front();
-            }
-            self.bytes.push_back(b);
-        }
-    }
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.bytes.iter().copied().collect::<Vec<_>>()).into_owned()
-    }
-}
-
 pub struct Session {
     child: Child,
     stderr: Arc<Mutex<RingBuffer>>,
@@ -607,102 +584,12 @@ pub fn shutdown_all(handles: &[SessionHandle], deadline: Duration) -> ShutdownRe
     }
     ShutdownReport { timed_out }
 }
-fn drain_stderr(mut reader: impl Read, buffer: Arc<Mutex<RingBuffer>>) {
-    let mut chunk = [0u8; 4096];
-    while let Ok(n) = reader.read(&mut chunk) {
-        if n == 0 {
-            break;
-        }
-        buffer
-            .lock()
-            .expect("stderr mutex poisoned")
-            .push(&chunk[..n]);
-    }
-}
 
-#[cfg(unix)]
-fn configure_process(command: &mut Command) -> Result<(), Error> {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        });
-    }
-    Ok(())
-}
-#[cfg(windows)]
-fn configure_process(command: &mut Command) -> Result<(), Error> {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
-    Ok(())
-}
-#[cfg(unix)]
+/// 走 [`quadcontrol_process::terminate`] 的终止梯子，并把本 crate 的全局信号
+/// 升级判断传进去，使 CLI 行为与抽出通用设施之前完全一致。
 fn terminate(child: &mut Child) -> Result<(), Error> {
-    let pid = -(child.id() as i32);
-    if !signal_escalated() {
-        unsafe {
-            libc::kill(pid, libc::SIGINT);
-        }
-    }
-    if !signal_escalated() && wait_for(child, Duration::from_secs(3)) {
-        return Ok(());
-    }
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
-    if wait_for(child, Duration::from_secs(2)) {
-        return Ok(());
-    }
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    child.wait()?;
+    quadcontrol_process::terminate(child, &signal_escalated)?;
     Ok(())
-}
-#[cfg(windows)]
-fn terminate(child: &mut Child) -> Result<(), Error> {
-    let has_console = unsafe { !windows_sys::Win32::System::Console::GetConsoleWindow().is_null() };
-    if has_console && !signal_escalated() {
-        unsafe {
-            let _ = windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(
-                windows_sys::Win32::System::Console::CTRL_BREAK_EVENT,
-                child.id(),
-            );
-        }
-    }
-    if has_console && !signal_escalated() && wait_for(child, Duration::from_secs(3)) {
-        return Ok(());
-    }
-    unsafe {
-        let handle = windows_sys::Win32::System::Threading::OpenProcess(
-            windows_sys::Win32::System::Threading::PROCESS_TERMINATE,
-            0,
-            child.id(),
-        );
-        if !handle.is_null() {
-            let _ = windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
-            let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
-        }
-    }
-    child.wait()?;
-    Ok(())
-}
-fn wait_for(child: &mut Child, timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if child.try_wait().ok().flatten().is_some() {
-            return true;
-        }
-        if signal_escalated() {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    false
 }
 
 static SIGNAL_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
