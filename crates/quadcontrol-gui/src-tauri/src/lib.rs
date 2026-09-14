@@ -1,7 +1,6 @@
 use adb_probe::{AdbCommand, CommandRunner, ExecutionError, ProbeError, SystemRunner};
-use quadcontrol_android::{SessionHandle, SessionStatus, SHUTDOWN_DEADLINE};
 use quadcontrol_android::wireless::{self, PairCancel, ROUND_TIMEOUT};
-use tauri::Manager;
+use quadcontrol_android::{SessionHandle, SessionStatus, SHUTDOWN_DEADLINE};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -9,6 +8,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
+use tauri::Manager;
 
 #[derive(Debug, Serialize)]
 struct DeviceDto {
@@ -40,10 +40,21 @@ struct SessionStore {
 
 enum PairingState {
     Idle,
-    Waiting { generation: u64, started: Instant },
-    Succeeded { generation: u64, device_name: String },
-    Failed { generation: u64, code: &'static str },
-    Cancelling { generation: u64 },
+    Waiting {
+        generation: u64,
+        started: Instant,
+    },
+    Succeeded {
+        generation: u64,
+        device_name: String,
+    },
+    Failed {
+        generation: u64,
+        code: &'static str,
+    },
+    Cancelling {
+        generation: u64,
+    },
 }
 
 struct PairingStore {
@@ -82,43 +93,93 @@ fn pairing_generation(state: &PairingState) -> u64 {
 }
 
 fn pairing_is_active(state: &PairingState) -> bool {
-    matches!(state, PairingState::Waiting { .. } | PairingState::Cancelling { .. })
+    matches!(
+        state,
+        PairingState::Waiting { .. } | PairingState::Cancelling { .. }
+    )
 }
 
 fn pairing_status_from(state: &PairingState) -> PairingStatusDto {
     match state {
-        PairingState::Idle => PairingStatusDto { generation: 0, state: "idle".into(), remaining_secs: None, device_name: None, error_code: None },
-        PairingState::Waiting { generation, started } => PairingStatusDto {
-            generation: *generation,
-            state: "waiting".into(),
-            remaining_secs: Some(ROUND_TIMEOUT.as_secs().saturating_sub(started.elapsed().as_secs())),
+        PairingState::Idle => PairingStatusDto {
+            generation: 0,
+            state: "idle".into(),
+            remaining_secs: None,
             device_name: None,
             error_code: None,
         },
-        PairingState::Succeeded { generation, device_name } => PairingStatusDto { generation: *generation, state: "succeeded".into(), remaining_secs: None, device_name: Some(device_name.clone()), error_code: None },
-        PairingState::Failed { generation, code } => PairingStatusDto { generation: *generation, state: "failed".into(), remaining_secs: None, device_name: None, error_code: Some((*code).into()) },
-        PairingState::Cancelling { generation } => PairingStatusDto { generation: *generation, state: "cancelling".into(), remaining_secs: None, device_name: None, error_code: None },
+        PairingState::Waiting {
+            generation,
+            started,
+        } => PairingStatusDto {
+            generation: *generation,
+            state: "waiting".into(),
+            remaining_secs: Some(
+                ROUND_TIMEOUT
+                    .as_secs()
+                    .saturating_sub(started.elapsed().as_secs()),
+            ),
+            device_name: None,
+            error_code: None,
+        },
+        PairingState::Succeeded {
+            generation,
+            device_name,
+        } => PairingStatusDto {
+            generation: *generation,
+            state: "succeeded".into(),
+            remaining_secs: None,
+            device_name: Some(device_name.clone()),
+            error_code: None,
+        },
+        PairingState::Failed { generation, code } => PairingStatusDto {
+            generation: *generation,
+            state: "failed".into(),
+            remaining_secs: None,
+            device_name: None,
+            error_code: Some((*code).into()),
+        },
+        PairingState::Cancelling { generation } => PairingStatusDto {
+            generation: *generation,
+            state: "cancelling".into(),
+            remaining_secs: None,
+            device_name: None,
+            error_code: None,
+        },
     }
 }
 
 fn set_pairing_result(store: &PairingStore, generation: u64, result: Result<String, &'static str>) {
-    let Ok(mut state) = store.state.lock() else { return };
-    if pairing_generation(&state) != generation { return; }
+    let Ok(mut state) = store.state.lock() else {
+        return;
+    };
+    if pairing_generation(&state) != generation {
+        return;
+    }
     if matches!(*state, PairingState::Cancelling { .. }) {
         *state = PairingState::Idle;
-        if let Ok(mut cancel) = store.cancel.lock() { *cancel = None; }
+        if let Ok(mut cancel) = store.cancel.lock() {
+            *cancel = None;
+        }
         return;
     }
     *state = match result {
-        Ok(name) => PairingState::Succeeded { generation, device_name: name },
+        Ok(name) => PairingState::Succeeded {
+            generation,
+            device_name: name,
+        },
         Err(code) => PairingState::Failed { generation, code },
     };
-    if let Ok(mut cancel) = store.cancel.lock() { *cancel = None; }
+    if let Ok(mut cancel) = store.cancel.lock() {
+        *cancel = None;
+    }
 }
 
 fn pairing_error_code(error: &wireless::WirelessError) -> &'static str {
     match error {
-        wireless::WirelessError::RoundTimedOut | wireless::WirelessError::TimedOut => "pair_timed_out",
+        wireless::WirelessError::RoundTimedOut | wireless::WirelessError::TimedOut => {
+            "pair_timed_out"
+        }
         wireless::WirelessError::Cancelled => "pair_cancelled",
         _ => "pair_failed",
     }
@@ -126,7 +187,11 @@ fn pairing_error_code(error: &wireless::WirelessError) -> &'static str {
 
 fn paired_device_name(serial: &str) -> String {
     match quadcontrol_android::devices(&quadcontrol_android::resolve_adb(None)) {
-        Ok(devices) => devices.into_iter().find(|device| device.serial == serial).and_then(|device| device.model).unwrap_or_else(|| "Android".into()),
+        Ok(devices) => devices
+            .into_iter()
+            .find(|device| device.serial == serial)
+            .and_then(|device| device.model)
+            .unwrap_or_else(|| "Android".into()),
         Err(_) => "Android".into(),
     }
 }
@@ -350,7 +415,10 @@ fn list_devices_blocking() -> DeviceListDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_device_list, pairing_status_from, parse_ios_devices, set_pairing_result, short_ios_name, PairingState, PairingStore};
+    use super::{
+        extract_device_list, pairing_status_from, parse_ios_devices, set_pairing_result,
+        short_ios_name, PairingState, PairingStore,
+    };
     use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -410,15 +478,31 @@ mod tests {
 
     #[test]
     fn late_worker_result_cannot_overwrite_new_generation() {
-        let store = PairingStore { state: Mutex::new(PairingState::Waiting { generation: 2, started: Instant::now() }), cancel: Mutex::new(None), next_generation: AtomicU64::new(2) };
+        let store = PairingStore {
+            state: Mutex::new(PairingState::Waiting {
+                generation: 2,
+                started: Instant::now(),
+            }),
+            cancel: Mutex::new(None),
+            next_generation: AtomicU64::new(2),
+        };
         set_pairing_result(&store, 1, Ok("old".into()));
-        assert_eq!(pairing_status_from(&store.state.lock().unwrap()).generation, 2);
-        assert_eq!(pairing_status_from(&store.state.lock().unwrap()).state, "waiting");
+        assert_eq!(
+            pairing_status_from(&store.state.lock().unwrap()).generation,
+            2
+        );
+        assert_eq!(
+            pairing_status_from(&store.state.lock().unwrap()).state,
+            "waiting"
+        );
     }
 
     #[test]
     fn pairing_status_countdown_uses_backend_start_time() {
-        let status = pairing_status_from(&PairingState::Waiting { generation: 7, started: Instant::now() - Duration::from_secs(2) });
+        let status = pairing_status_from(&PairingState::Waiting {
+            generation: 7,
+            started: Instant::now() - Duration::from_secs(2),
+        });
         assert!(status.remaining_secs.unwrap() <= 298);
         assert!(status.remaining_secs.unwrap() > 0);
     }
@@ -432,7 +516,10 @@ async fn list_devices() -> Result<DeviceListDto, String> {
 }
 
 #[tauri::command]
-async fn start_pairing(app: tauri::AppHandle, store: tauri::State<'_, PairingStore>) -> Result<PairingStartDto, String> {
+async fn start_pairing(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, PairingStore>,
+) -> Result<PairingStartDto, String> {
     let store = store.inner();
     let secret = wireless::generate_pairing_secret();
     let matrix = wireless::qr_matrix(&secret.payload).map_err(|_| "pair_failed".to_owned())?;
@@ -440,8 +527,13 @@ async fn start_pairing(app: tauri::AppHandle, store: tauri::State<'_, PairingSto
     let generation = store.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
     {
         let mut state = store.state.lock().map_err(|_| "pair_failed".to_owned())?;
-        if pairing_is_active(&state) { return Err("pairing_already_running".into()); }
-        *state = PairingState::Waiting { generation, started: Instant::now() };
+        if pairing_is_active(&state) {
+            return Err("pairing_already_running".into());
+        }
+        *state = PairingState::Waiting {
+            generation,
+            started: Instant::now(),
+        };
         *store.cancel.lock().map_err(|_| "pair_failed".to_owned())? = Some(cancel.clone());
     }
     // Tauri's blocking pool owns the ADB work; the managed app state remains
@@ -450,12 +542,24 @@ async fn start_pairing(app: tauri::AppHandle, store: tauri::State<'_, PairingSto
         let result = tauri::async_runtime::spawn_blocking(move || {
             let adb = quadcontrol_android::resolve_adb(None);
             let outcome = wireless::pair_qr_command_with_cancel(&adb, secret, |_| {}, &cancel);
-            match outcome { Ok((serial, _, _)) => Ok(paired_device_name(&serial)), Err(error) => Err(pairing_error_code(&error)) }
-        }).await;
-        let result = match result { Ok(result) => result, Err(_) => Err("pair_failed") };
+            match outcome {
+                Ok((serial, _, _)) => Ok(paired_device_name(&serial)),
+                Err(error) => Err(pairing_error_code(&error)),
+            }
+        })
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err("pair_failed"),
+        };
         set_pairing_result(&app.state::<PairingStore>(), generation, result);
     });
-    Ok(PairingStartDto { generation, side: matrix.side, modules: matrix.modules, total_secs: ROUND_TIMEOUT.as_secs() })
+    Ok(PairingStartDto {
+        generation,
+        side: matrix.side,
+        modules: matrix.modules,
+        total_secs: ROUND_TIMEOUT.as_secs(),
+    })
 }
 
 #[tauri::command]
@@ -470,16 +574,27 @@ async fn cancel_pairing(store: tauri::State<'_, PairingStore>) -> Result<(), Str
     let store = store.inner();
     let mut state = store.state.lock().map_err(|_| "pair_failed".to_owned())?;
     if let PairingState::Waiting { generation, .. } = *state {
-        if let Some(cancel) = store.cancel.lock().map_err(|_| "pair_failed".to_owned())?.as_ref() { cancel.cancel(); }
+        if let Some(cancel) = store
+            .cancel
+            .lock()
+            .map_err(|_| "pair_failed".to_owned())?
+            .as_ref()
+        {
+            cancel.cancel();
+        }
         *state = PairingState::Cancelling { generation };
     }
     Ok(())
 }
 
-fn valid_pair_host(host: &str) -> bool { host.parse::<IpAddr>().is_ok() }
+fn valid_pair_host(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok()
+}
 
 fn validate_manual_inputs(host: &str, port: u16, code: &str) -> Result<(), &'static str> {
-    if !valid_pair_host(host) { return Err("pair_failed"); }
+    if !valid_pair_host(host) {
+        return Err("pair_failed");
+    }
     if port == 0 || !code.as_bytes().iter().all(u8::is_ascii_digit) || code.len() != 6 {
         return Err("pair_failed");
     }
@@ -498,7 +613,7 @@ async fn pair_manual(
     host: String,
     port: u16,
     mut code: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     if validate_manual_inputs(&host, port, &code).is_err() {
         wireless::wipe_secret_string(&mut code);
         return Err("pair_failed".into());
@@ -544,7 +659,8 @@ async fn pair_manual(
         };
         set_pairing_result(&app.state::<PairingStore>(), generation, result);
     });
-    Ok(())
+    // 只表示 worker 已起飞；真正的结果由界面轮询 `pairing_status` 按 generation 取。
+    Ok(generation)
 }
 
 /// Windows 上**有意不提供**会话控制，而不是尚未实现。
@@ -574,16 +690,22 @@ async fn start_session(
     audio_on_computer: bool,
 ) -> Result<(), String> {
     let store = store.inner();
-    let mut sessions = store
-        .sessions
-        .lock()
-        .map_err(|_| "session_start_failed".to_owned())?;
-    if let Some(existing) = sessions.get(&device_id) {
-        if matches!(existing.status(), SessionStatus::Running | SessionStatus::Stopping) {
-            return Err("session_already_running".into());
+    let id = {
+        let mut sessions = store
+            .sessions
+            .lock()
+            .map_err(|_| "session_start_failed".to_owned())?;
+        if let Some(existing) = sessions.get(&device_id) {
+            if matches!(
+                existing.status(),
+                SessionStatus::Running | SessionStatus::Stopping
+            ) {
+                return Err("session_already_running".into());
+            }
         }
-    }
-    sessions.remove(&device_id);
+        sessions.remove(&device_id);
+        store.next_id.fetch_add(1, Ordering::Relaxed)
+    };
     let options = quadcontrol_android::LaunchOptions {
         adb: quadcontrol_android::resolve_adb(None),
         scrcpy: quadcontrol_android::resolve_scrcpy(None),
@@ -594,17 +716,37 @@ async fn start_session(
         passthrough: Vec::new(),
         scrcpy_env: Vec::new(),
     };
-    let id = store.next_id.fetch_add(1, Ordering::Relaxed);
-    match quadcontrol_android::spawn_supervised(&options, id) {
-        Ok(handle) => {
-            sessions.insert(device_id, handle);
-            Ok(())
-        }
-        Err(error) => {
-            eprintln!("session start failed: {error}");
-            Err(session_error_code(&error).into())
+    // `Session::start` 会跑 `scrcpy --version`（带超时）再 spawn——都是阻塞
+    // 调用，不能占着 async 运行时，也不能在持锁期间做。
+    let spawned = tauri::async_runtime::spawn_blocking(move || {
+        quadcontrol_android::spawn_supervised(&options, id)
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("session start worker failed: {error}");
+        "session_start_failed".to_owned()
+    })?;
+    let handle = spawned.map_err(|error| {
+        eprintln!("session start failed: {error}");
+        session_error_code(&error).to_owned()
+    })?;
+    let mut sessions = store
+        .sessions
+        .lock()
+        .map_err(|_| "session_start_failed".to_owned())?;
+    if let Some(existing) = sessions.get(&device_id) {
+        // 阻塞期间被另一次调用抢先：不能让两份 scrcpy 同时控制一台手机，
+        // 把刚起的这份收回。
+        if matches!(
+            existing.status(),
+            SessionStatus::Running | SessionStatus::Stopping
+        ) {
+            let _ = handle.request_stop();
+            return Err("session_already_running".into());
         }
     }
+    sessions.insert(device_id, handle);
+    Ok(())
 }
 
 #[tauri::command]
@@ -618,12 +760,10 @@ async fn stop_session(
         .lock()
         .map_err(|_| "session_start_failed".to_owned())?;
     if let Some(handle) = sessions.get(&device_id) {
-        handle
-            .request_stop()
-            .map_err(|error| {
-                eprintln!("session stop failed: {error}");
-                "session_start_failed".to_owned()
-            })?;
+        handle.request_stop().map_err(|error| {
+            eprintln!("session stop failed: {error}");
+            "session_start_failed".to_owned()
+        })?;
     }
     Ok(())
 }
@@ -638,13 +778,20 @@ async fn sessions(store: tauri::State<'_, SessionStore>) -> Result<Vec<SessionDt
     Ok(sessions
         .iter()
         .map(|(device_id, handle)| match handle.status() {
+            // 状态卡按 GUI_PLAN 要显示「退出码 + stderr 尾」，但只在非零退出时
+            // 才有诊断价值；正常退出不外传原始输出。
             SessionStatus::Exited { code, stderr_tail } => SessionDto {
                 device_id: device_id.clone(),
                 state: "exited".into(),
                 exit_code: Some(code),
-                stderr_tail: Some(truncate_tail(stderr_tail, 2000)),
+                stderr_tail: (code != 0).then(|| truncate_tail(stderr_tail, 2000)),
             },
-            SessionStatus::Failed { .. } => session_dto(device_id.clone(), SessionStatus::Failed { message: "session_failed".into() }),
+            SessionStatus::Failed { .. } => session_dto(
+                device_id.clone(),
+                SessionStatus::Failed {
+                    message: "session_failed".into(),
+                },
+            ),
             status => session_dto(device_id.clone(), status),
         })
         .collect())
@@ -734,7 +881,10 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
 
             let store = worker.state::<SessionStore>();
             let handles = match store.sessions.lock() {
-                Ok(mut sessions) => sessions.drain().map(|(_, handle)| handle).collect::<Vec<_>>(),
+                Ok(mut sessions) => sessions
+                    .drain()
+                    .map(|(_, handle)| handle)
+                    .collect::<Vec<_>>(),
                 Err(_) => {
                     eprintln!("session store is poisoned during shutdown");
                     Vec::new()

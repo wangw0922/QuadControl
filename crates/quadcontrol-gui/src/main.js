@@ -298,8 +298,11 @@ function renderSession() {
   detail.textContent = state === "failed" ? describeError(session?.stderr_tail ?? "session_failed")
     : state === "exited" ? stateText : stateText;
   const stderr = document.querySelector("#session-stderr");
-  stderr.hidden = state !== "failed" || !session?.stderr_tail;
-  stderr.textContent = stderr.hidden ? "" : describeError(session.stderr_tail);
+  // 失败时 stderr_tail 是稳定错误码，翻译后显示；非零退出时是 scrcpy 的原始
+  // 尾部输出（诊断用，仅此一处允许原文）。
+  const showTail = Boolean(session?.stderr_tail) && (state === "failed" || (state === "exited" && session?.exit_code !== 0));
+  stderr.hidden = !showTail;
+  stderr.textContent = !showTail ? "" : state === "failed" ? describeError(session.stderr_tail) : session.stderr_tail;
 }
 
 // 后端只回稳定错误码，这里翻译；认不出的码退回通用文案，绝不把原始英文抛给用户。
@@ -325,6 +328,12 @@ async function refreshDevices() {
     devices = result.devices ?? [];
     sessionsByDevice.clear();
     (sessionResult ?? []).forEach((session) => sessionsByDevice.set(session.device_id, session));
+    // 本地过渡态（starting/stopping）只是为了点击后立即反馈；后端一旦给出终态
+    // 就以后端为准，否则断开成功后按钮会永远停在「正在断开连接…」。
+    localSessionStates.forEach((_, deviceId) => {
+      const backend = sessionsByDevice.get(deviceId)?.state;
+      if (backend !== "running" && backend !== "stopping") localSessionStates.delete(deviceId);
+    });
     discoveryErrors = [result.android_error, result.ios_error]
       .filter(Boolean)
       .map(describeError);
@@ -358,11 +367,12 @@ sessionAction.addEventListener("click", async () => {
     renderSession();
     try {
       await window.__TAURI__.core.invoke("stop_session", { deviceId: device.id });
+      await waitForSessionSettled(device.id);
     } catch (error) {
       console.error("stop_session failed", error);
-      localSessionStates.delete(device.id);
-      renderSession();
     }
+    localSessionStates.delete(device.id);
+    await refreshDevices();
     return;
   }
   const preferences = preferencesFor(device.id);
@@ -375,13 +385,26 @@ sessionAction.addEventListener("click", async () => {
       audioOnComputer: preferences.audioOnComputer,
     });
     localSessionStates.delete(device.id);
+    await refreshDevices();
   } catch (error) {
     console.error("start_session failed", error);
     localSessionStates.delete(device.id);
     sessionsByDevice.set(device.id, { device_id: device.id, state: "failed", stderr_tail: String(error) });
+    renderSession();
   }
-  renderSession();
 });
+
+// 断开后端最多要走 7 秒的终止梯子；在此期间保持「正在断开连接…」，
+// 直到后端不再报 running/stopping 或超出预算。
+async function waitForSessionSettled(deviceId) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const sessions = await window.__TAURI__.core.invoke("sessions");
+    const state = (sessions ?? []).find((session) => session.device_id === deviceId)?.state;
+    if (state !== "running" && state !== "stopping") return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
 
 soundInputs.forEach((input) => input.addEventListener("change", () => {
   const device = selectedDevice();
@@ -441,10 +464,20 @@ function renderPairingSteps() {
   });
 }
 
+// 扫码与手动两条路都靠这个轮询拿结果：后端命令只表示 worker 已起飞。
+function pairingStatusTarget() {
+  return manualForm.hidden ? document.querySelector("#qr-countdown") : document.querySelector("#manual-error");
+}
+
 function updateCountdown() {
   return window.__TAURI__.core.invoke("pairing_status").then((status) => {
     if (status.generation !== pairingGeneration) return;
-    document.querySelector("#qr-countdown").textContent = text.qrCountdown.replace("{seconds}", formatRemaining(status.remaining_secs ?? 0));
+    const target = pairingStatusTarget();
+    if (!target) return;
+    target.hidden = false;
+    target.textContent = manualForm.hidden
+      ? text.qrCountdown.replace("{seconds}", formatRemaining(status.remaining_secs ?? 0))
+      : text.waitingScan;
     if (status.state === "succeeded") {
       pairingDeviceName = status.device_name ?? "Android";
       document.querySelector("[data-i18n='pairingCompleteDescription']").textContent = text.pairingCompleteDescription.replace("{device}", pairingDeviceName);
@@ -453,7 +486,8 @@ function updateCountdown() {
       setPairingStep(3);
       refreshDevices();
     } else if (status.state === "failed") {
-      document.querySelector("#qr-countdown").textContent = describePairingError(status.error_code ?? "pair_failed");
+      clearInterval(countdownTimer);
+      target.textContent = describePairingError(status.error_code ?? "pair_failed");
     }
   }).catch(() => {});
 }
@@ -559,13 +593,10 @@ manualForm.addEventListener("submit", (event) => {
   const code = manualForm.elements.code.value;
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^\d{6}$/.test(code)) return;
   window.__TAURI__.core.invoke("pair_manual", { host: manualForm.elements.host.value, port, code })
-    .then(() => {
-      pairingDeviceName = "Android";
-      document.querySelector("[data-i18n='pairingCompleteDescription']").textContent = text.pairingCompleteDescription.replace("{device}", pairingDeviceName);
-      clearInterval(countdownTimer);
-      clearQrCode();
-      setPairingStep(3);
-      refreshDevices();
+    .then((generation) => {
+      // 命令返回只代表 worker 已起飞；成功/失败由轮询按 generation 取回。
+      pairingGeneration = generation;
+      startPairingStatusPoll();
     })
     .catch((error) => {
       const message = describePairingError(String(error));
