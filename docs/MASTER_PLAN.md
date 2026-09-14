@@ -142,6 +142,12 @@ GUI 真机扫码端到端都尚未执行**，STATUS.md 如实标注。下一步�
 
 ### P4 iPhone 控制面板（= GUI_PLAN G4，界面 C 落地）
 
+**代码已合并（2026-09-14，#27 / #28 / #29），真机验收未执行。** 方案与裁决见
+[IOS_PANEL_PLAN.md](IOS_PANEL_PLAN.md)。落地与原范围的出入：「亮屏」改为「唤醒
+屏幕」（公开 unlock 手势，效果核验 = 前后对比 locked）；画面容器按设备长宽比定尺
+而非固定 246×500；真机验收改在 macOS 宿主的 debug 构建 + `QUADCONTROL_IOS_DEV_WDA=1`
+路径执行；MJPEG ≥10 fps 是假设（真机只测过 2.4 fps 截图上限）。
+
 - 【范围】按交接包界面 C 实现：左侧 246×500 WDA MJPEG 流（每会话独立本地
   端口，CSP `img-src` 仅 localhost）；点击画面转发点按；文字转发卡；亮屏/
   截屏/回主屏按钮（经 WDA）；「已连接 · N 帧/秒」标签；macOS 上替换为引导卡

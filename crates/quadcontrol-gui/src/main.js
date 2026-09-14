@@ -66,6 +66,7 @@ const messages = {
     iosMirroringOpen: "打开 iPhone 镜像",
     iosMirroringUnavailable: "需要 macOS 15 及以上",
     iosSessionElsewhere: "已有 iPhone 会话在运行",
+    err_ios_link_lost: "iPhone 链路已中断，请重新连接。",
     err_unknown: "设备发现暂时不可用。",
     showMirror: "显示镜像窗口",
     disconnect: "断开连接",
@@ -201,6 +202,7 @@ const messages = {
     iosMirroringOpen: "Open iPhone Mirroring",
     iosMirroringUnavailable: "Requires macOS 15 or newer",
     iosSessionElsewhere: "An iPhone session is already running",
+    err_ios_link_lost: "The iPhone link was lost. Reconnect to continue.",
     err_unknown: "Device discovery is temporarily unavailable.",
     showMirror: "Show mirror window",
     disconnect: "Disconnect",
@@ -362,7 +364,7 @@ function iosSessionIsLive(state) {
 /// 因为状态 DTO 里没有 UDID）。此时仍要让「断开连接」可达，但**不认领画面**：
 /// 接了两台 iPhone 时把别人的屏幕显示在这台设备的面板上，比少显示一块画面糟糕。
 function iosSessionIsUnowned() {
-  return !iosOwnsSelectedDevice() && iosSessionIsLive(iosStatus.state);
+  return currentIosView().unowned;
 }
 
 function iosOwnsSelectedDevice() {
@@ -606,12 +608,69 @@ screenInputs.forEach((input) => input.addEventListener("change", () => {
 // 界面 C：iPhone 控制面板
 // ---------------------------------------------------------------------------
 
-function iosStateText(state) {
-  if (state === "starting") return text.sessionStarting;
-  if (state === "stopping") return text.sessionStopping;
-  if (state === "failed") return describeError(iosStatus.code ?? "session_failed");
-  if (state === "running") return text.sessionRunning;
-  return text.iosDisconnected;
+/// 状态 + 归属 + 平台 → 渲染决策。**纯函数**：只读参数与 `text`，不碰 DOM，
+/// 也不读模块里的可变状态。界面 C 的所有分支判断都集中在这里，applyIosStatus
+/// 只负责把结果写进 DOM。
+function iosViewModel({ status, ownsSelected, guidanceOnly, platform }) {
+  const state = ownsSelected ? (status.state ?? "idle") : "idle";
+  // 后端说有会话在跑，但前端不知道它属于谁（界面重载会丢掉归属）。
+  const unowned = !ownsSelected && iosSessionIsLive(status.state);
+  const running = state === "running";
+  const locked = running && status.locked === true;
+  // Windows 上收不回进程树，与 Android 面板一样明确拒绝，而不是让用户点了才知道。
+  const windowsBlocked = platform === "windows";
+
+  let statusText;
+  if (unowned) {
+    statusText = text.iosSessionElsewhere;
+  } else if (state === "failed") {
+    statusText = describeError(status.code ?? "session_failed");
+  } else if (state === "exited" && status.exit_reason && status.exit_reason !== "requested") {
+    // 自己退的会话不报错；被链路拖死的要说明原因。
+    statusText = describeError(
+      status.exit_reason === "upstream_closed" ? "proxy_failed" : "ios_link_lost",
+    );
+  } else if (state === "starting") {
+    statusText = text.sessionStarting;
+  } else if (state === "stopping") {
+    statusText = text.sessionStopping;
+  } else if (running) {
+    statusText = text.sessionRunning;
+  } else if (windowsBlocked) {
+    statusText = describeError("windows_session_unsupported");
+  } else {
+    statusText = text.iosDisconnected;
+  }
+
+  const isDisconnect = running || state === "stopping" || unowned;
+  return {
+    state,
+    unowned,
+    running,
+    locked,
+    statusText,
+    stageText: running
+      ? text.iosConnected.replace("{fps}", String(status.fps ?? 0))
+      : statusText,
+    actionLabel: isDisconnect ? text.disconnect : text.startControl,
+    actionIsDisconnect: isDisconnect,
+    actionDisabled: state === "starting" || state === "stopping" || (windowsBlocked && !isDisconnect),
+    textEnabled: running && !locked,
+    actionsEnabled: running,
+    aspectRatio: running && status.window ? `${status.window.width} / ${status.window.height}` : "",
+    shouldStream: !guidanceOnly && ownsSelected && running && Boolean(status.proxy_port),
+    proxyPort: status.proxy_port,
+  };
+}
+
+/// 当前选中设备对应的视图模型。
+function currentIosView() {
+  return iosViewModel({
+    status: iosStatus,
+    ownsSelected: iosOwnsSelectedDevice(),
+    guidanceOnly: iosGuidanceOnly(),
+    platform: hostPlatform,
+  });
 }
 
 /// 只做「平台决定的骨架」：显示哪些卡片、按钮在不在。每秒轮询走 applyIosStatus。
@@ -639,38 +698,31 @@ function renderIosPanel() {
 /// 每秒轮询只改文案与 disabled，绝不重建 DOM、绝不碰 `img.src`。
 function applyIosStatus() {
   const device = selectedDevice();
-  if (!device || device.platform !== "ios") return;
-  const state = iosOwnsSelectedDevice() ? iosStatus.state : "idle";
-  const unowned = iosSessionIsUnowned();
-  const running = state === "running";
-  const locked = running && iosStatus.locked === true;
+  if (!device || device.platform !== "ios") {
+    // 选中的不是 iPhone：面板不归它管，但流该断还是要断。
+    syncIosStream();
+    return;
+  }
+  const view = currentIosView();
 
-  document.querySelector("#session-state").textContent = unowned
-    ? text.iosSessionElsewhere
-    : iosStateText(state);
-  const disconnecting = state === "running" || state === "stopping" || unowned;
-  sessionAction.textContent = disconnecting ? text.disconnect : text.startControl;
-  sessionAction.classList.toggle("btn-primary", !disconnecting);
-  sessionAction.classList.toggle("btn-disconnect", disconnecting);
-  sessionAction.disabled = state === "starting" || state === "stopping";
+  document.querySelector("#session-state").textContent = view.statusText;
+  sessionAction.textContent = view.actionLabel;
+  sessionAction.classList.toggle("btn-primary", !view.actionIsDisconnect);
+  sessionAction.classList.toggle("btn-disconnect", view.actionIsDisconnect);
+  sessionAction.disabled = view.actionDisabled;
 
-  iosFpsTag.textContent = running
-    ? text.iosConnected.replace("{fps}", String(iosStatus.fps ?? 0))
-    : unowned
-      ? text.iosSessionElsewhere
-      : iosStateText(state);
-  iosLockedNote.hidden = !locked;
+  iosFpsTag.textContent = view.stageText;
+  iosLockedNote.hidden = !view.locked;
   // 画面容器按设备长宽比定尺；后端用同一个 window 算内容矩形，两边的 letterbox
   // 才是同一个（见 `content_point`）。
-  const window_ = running ? iosStatus.window : null;
-  iosStage.style.aspectRatio = window_ ? `${window_.width} / ${window_.height}` : "";
-  iosStage.classList.toggle("is-live", running);
+  iosStage.style.aspectRatio = view.aspectRatio;
+  iosStage.classList.toggle("is-live", view.running);
 
   // 锁定时不转发文字：WDA 在锁屏下返回成功但字符不送达（真机测量）。
-  iosTextInput.disabled = !running || locked;
-  iosSendButton.disabled = !running || locked;
+  iosTextInput.disabled = !view.textEnabled;
+  iosSendButton.disabled = !view.textEnabled;
   [iosWakeButton, iosCaptureButton, iosHomeButton].forEach((button) => {
-    button.disabled = !running;
+    button.disabled = !view.actionsEnabled;
   });
 
   syncIosStream();
@@ -680,13 +732,7 @@ function applyIosStatus() {
 /// MJPEG 是无限流：`src` **只在状态迁移时**设置或清空。每秒重设会让画面每秒重连。
 function syncIosStream() {
   const device = selectedDevice();
-  const shouldStream =
-    !iosGuidanceOnly() &&
-    Boolean(device) &&
-    device.platform === "ios" &&
-    device.id === iosSessionDeviceId &&
-    iosStatus.state === "running" &&
-    Boolean(iosStatus.proxy_port);
+  const shouldStream = device?.platform === "ios" && currentIosView().shouldStream;
   if (shouldStream === iosStreaming) return;
   iosStreaming = shouldStream;
   if (shouldStream) {
@@ -704,18 +750,26 @@ async function pollIosStatus() {
   // 一次轮询里有两次 5 秒超时的 WDA 查询，不加闸会越堆越多。
   if (iosPollInFlight) return;
   iosPollInFlight = true;
-  const wasControlled = Boolean(device) && deviceIsControlled(device);
+  const wasLive = iosSessionIsLive(iosStatus.state);
   try {
-    iosStatus = await window.__TAURI__.core.invoke("ios_session_status");
-    if (iosStatus.state === "idle") iosSessionDeviceId = undefined;
+    const next = await window.__TAURI__.core.invoke("ios_session_status");
+    // 平台闸门（`macos_uses_iphone_mirroring` / `windows_session_unsupported`）
+    // 在后端建槽位之前就返回了，所以那类失败只存在于前端。后端回 idle 时不要
+    // 覆盖它，否则错误码闪一下就没了。
+    const keepLocalFailure =
+      next.state === "idle" && iosStatus.state === "failed" && Boolean(iosSessionDeviceId);
+    if (!keepLocalFailure) {
+      iosStatus = next;
+      if (next.state === "idle") iosSessionDeviceId = undefined;
+    }
   } catch (error) {
     console.error("ios_session_status failed", error);
   } finally {
     iosPollInFlight = false;
   }
   applyIosStatus();
-  // 侧栏的「正在控制」只在状态真的翻转时重建，避免每秒重画设备列表。
-  if ((Boolean(device) && deviceIsControlled(device)) !== wasControlled) renderDevices();
+  // 侧栏的「正在控制」只在会话活/死翻转时重建，避免每秒重画设备列表。
+  if (iosSessionIsLive(iosStatus.state) !== wasLive) renderDevices();
 }
 
 // 断开后端最多走 7 秒的终止梯子；期间保持「正在断开连接…」。
@@ -759,8 +813,9 @@ async function handleIosSessionAction(device) {
     await pollIosStatus();
   } catch (error) {
     console.error("start_ios_session failed", error);
-    iosSessionDeviceId = undefined;
-    // 后端只回稳定错误码；describeError 负责翻译。
+    // **保留归属**：失败属于这台设备。清掉的话 applyIosStatus 会把它当 idle，
+    // 整张启动错误码表就永远显示不出来。下一次 start 或后端报 idle 之外的状态
+    // 会覆盖它（轮询里的 keepLocalFailure 负责不让 idle 抹掉它）。
     iosStatus = { state: "failed", code: String(error), fps: 0 };
     applyIosStatus();
   }
@@ -819,7 +874,8 @@ async function sendIosText() {
     console.error("ios_send_text failed", error);
     showIosNote(iosTextResult, describeError(String(error)));
   }
-  iosSendButton.disabled = false;
+  // 交回视图模型决定按钮状态：直接置 false 会盖掉锁定/已断开时的禁用。
+  applyIosStatus();
 }
 
 iosSendButton.addEventListener("click", sendIosText);

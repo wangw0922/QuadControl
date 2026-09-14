@@ -366,11 +366,44 @@ const IPHONE_MIRRORING_APP: &str = "/System/Applications/iPhone Mirroring.app";
 /// 不是偷懒：go-ios 的隧道信息服务是每主机一份，多隧道行为我们没验证过
 /// （`IOS_PANEL_PLAN.md` §一）。多设备是 P4 之后的事。
 struct IosSessionStore {
-    session: Mutex<Option<IosSessionHandle>>,
-    /// 与 `SessionStore::next_id` 同理：Windows 上起不了会话，这个计数器用不上。
-    #[cfg_attr(windows, allow(dead_code))]
+    session: Mutex<Option<IosSlot>>,
     next_id: AtomicU64,
     meta: Mutex<IosMeta>,
+}
+
+/// 会话槽位。
+///
+/// 有 `Starting` 占位而不是「锁外 None、成功后再放句柄」，是因为
+/// `spawn_supervised` 的预检（`ios version` + 端口探测）要跑在 `spawn_blocking`
+/// 里，那段时间 store 一旦是 None 就有两个后果：1 秒轮询读到 idle，把前端的
+/// 会话归属清掉，会话变成无主的；两次并发 `start_ios_session` 都能穿过检查，
+/// **真的起两条 tunnel**。占位让第二次调用在窗口内就命中
+/// `ios_session_already_running`。
+enum IosSlot {
+    /// 预检与 spawn 还没回来。
+    Starting,
+    /// 起会话失败；停在这里直到下一次 start 覆盖它，界面才有错误码可显示。
+    Failed {
+        code: &'static str,
+    },
+    Handle(IosSessionHandle),
+}
+
+/// 槽位对外的状态。占位与失败都能用库的状态枚举表达，DTO 映射因此只有一套。
+fn slot_status(slot: &IosSlot) -> IosSessionStatus {
+    match slot {
+        IosSlot::Starting => IosSessionStatus::Starting,
+        IosSlot::Failed { code } => IosSessionStatus::Failed { code },
+        IosSlot::Handle(handle) => handle.status(),
+    }
+}
+
+fn ios_slot_is_live(slot: &IosSlot) -> bool {
+    match slot {
+        IosSlot::Starting => true,
+        IosSlot::Failed { .. } => false,
+        IosSlot::Handle(handle) => ios_session_is_live(&handle.status()),
+    }
 }
 
 /// 会话的派生量：帧率差分的上一帧快照与最近一次窗口尺寸。
@@ -498,7 +531,10 @@ fn ios_client(store: &IosSessionStore) -> Result<quadcontrol_ios::wda::Client, S
         .map_err(|_| "ios_session_not_running".to_owned())?;
     session
         .as_ref()
-        .and_then(IosSessionHandle::client)
+        .and_then(|slot| match slot {
+            IosSlot::Handle(handle) => handle.client(),
+            _ => None,
+        })
         .ok_or_else(|| "ios_session_not_running".to_owned())
 }
 
@@ -565,6 +601,14 @@ fn wda_ids_from_env() -> WdaIds {
     }
 }
 
+/// 换槽位；锁被毒化时只记日志——启动失败的收尾不该再 panic 一次。
+fn set_ios_slot(store: &IosSessionStore, slot: IosSlot) {
+    match store.session.lock() {
+        Ok(mut session) => *session = Some(slot),
+        Err(_) => eprintln!("iOS session store is poisoned; slot was not updated"),
+    }
+}
+
 fn ios_session_is_live(status: &IosSessionStatus) -> bool {
     matches!(
         status,
@@ -606,12 +650,12 @@ async fn start_ios_session(
             .lock()
             .map_err(|_| "ios_process_error".to_owned())?;
         if let Some(existing) = session.as_ref() {
-            if ios_session_is_live(&existing.status()) {
+            if ios_slot_is_live(existing) {
                 return Err("ios_session_already_running".into());
             }
         }
-        // 上一个已经是 Exited / Failed：换掉它。
-        *session = None;
+        // 上一个已经是 Exited / Failed：换成本次的占位。
+        *session = Some(IosSlot::Starting);
         store.next_id.fetch_add(1, Ordering::Relaxed)
     };
     // GUI 只起完整链路；`LaunchMode::Attach` 只存在于库与其测试里（方案 §三）。
@@ -628,27 +672,41 @@ async fn start_ios_session(
     let spawned = tauri::async_runtime::spawn_blocking(move || {
         quadcontrol_ios::session::spawn_supervised(&options, id)
     })
-    .await
-    .map_err(|error| {
-        eprintln!("iOS session start worker failed: {error}");
-        "ios_process_error".to_owned()
-    })?;
-    let handle = spawned.map_err(|error| {
-        eprintln!("iOS session start failed: {error}");
-        error.code().to_owned()
-    })?;
+    .await;
+    // 不管走哪条路，占位都必须被换掉，否则 store 永远停在 `Starting`，
+    // 界面也就永远停在「正在启动会话…」。
+    let handle = match spawned {
+        Err(error) => {
+            eprintln!("iOS session start worker failed: {error}");
+            set_ios_slot(
+                store,
+                IosSlot::Failed {
+                    code: "ios_process_error",
+                },
+            );
+            return Err("ios_process_error".into());
+        }
+        Ok(Err(error)) => {
+            eprintln!("iOS session start failed: {error}");
+            let code = error.code();
+            set_ios_slot(store, IosSlot::Failed { code });
+            return Err(code.to_owned());
+        }
+        Ok(Ok(handle)) => handle,
+    };
     let mut session = store
         .session
         .lock()
         .map_err(|_| "ios_process_error".to_owned())?;
-    if let Some(existing) = session.as_ref() {
-        // 预检期间被另一次调用抢先：不能有两条 WDA 链路，把刚起的这份收回。
+    if let Some(IosSlot::Handle(existing)) = session.as_ref() {
+        // 占位本该挡住并发的第二次调用；真到了这里说明有别的路径塞了句柄进来，
+        // 宁可把刚起的这份收回，也不能让两条 WDA 链路同时活着。
         if ios_session_is_live(&existing.status()) {
             let _ = handle.request_stop();
             return Err("ios_session_already_running".into());
         }
     }
-    *session = Some(handle);
+    *session = Some(IosSlot::Handle(handle));
     if let Ok(mut meta) = store.meta.lock() {
         *meta = IosMeta::default();
     }
@@ -662,11 +720,15 @@ async fn stop_ios_session(store: tauri::State<'_, IosSessionStore>) -> Result<()
         .session
         .lock()
         .map_err(|_| "ios_process_error".to_owned())?;
-    if let Some(handle) = session.as_ref() {
-        handle.request_stop().map_err(|error| {
+    match session.as_ref() {
+        Some(IosSlot::Handle(handle)) => handle.request_stop().map_err(|error| {
             eprintln!("iOS session stop failed: {error}");
             "ios_process_error".to_owned()
-        })?;
+        })?,
+        // 占位期间还没有监督线程可停：预检只有几百毫秒，等它换成句柄后再停。
+        // 这里不报错，免得界面把「还没起完」显示成失败。
+        Some(IosSlot::Starting) => eprintln!("iOS session is still starting; stop was ignored"),
+        Some(IosSlot::Failed { .. }) | None => {}
     }
     Ok(())
 }
@@ -681,9 +743,10 @@ async fn ios_session_status(
             .session
             .lock()
             .map_err(|_| "ios_process_error".to_owned())?;
-        session
-            .as_ref()
-            .map(|handle| (handle.status(), handle.stats().frames, handle.client()))
+        session.as_ref().map(|slot| match slot {
+            IosSlot::Handle(handle) => (handle.status(), handle.stats().frames, handle.client()),
+            placeholder => (slot_status(placeholder), 0, None),
+        })
     };
     let Some((status, frames, client)) = snapshot else {
         return Ok(ios_idle_dto());
@@ -834,9 +897,9 @@ async fn open_iphone_mirroring() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_point, diff_fps, ios_status_dto, pairing_status_from, screenshot_path,
-        set_pairing_result, ExitReason, IosSessionStatus, PairingState, PairingStore, WindowDto,
-        WindowSize,
+        content_point, diff_fps, ios_slot_is_live, ios_status_dto, pairing_status_from,
+        screenshot_path, set_pairing_result, slot_status, wda_ids_from_env, ExitReason,
+        IosSessionStatus, IosSlot, PairingState, PairingStore, WindowDto, WindowSize,
     };
     use chrono::TimeZone;
     use std::sync::atomic::AtomicU64;
@@ -1040,6 +1103,90 @@ mod tests {
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
             "QuadControl-20260914-080503.png"
+        );
+    }
+
+    /// 占位与失败槽位要映射成界面认得的状态。
+    ///
+    /// `IosSlot::Handle` 这一支没法在单测里构造（要真的起子进程），它只是把
+    /// `IosSessionHandle::status()` 原样转出去，覆盖在库的 session 测试里。
+    #[test]
+    fn slot_placeholders_map_to_starting_and_failed() {
+        assert_eq!(slot_status(&IosSlot::Starting), IosSessionStatus::Starting);
+        assert_eq!(
+            ios_status_dto(&slot_status(&IosSlot::Starting)).state,
+            "starting"
+        );
+
+        let failed = slot_status(&IosSlot::Failed {
+            code: "wda_signature_expired",
+        });
+        let dto = ios_status_dto(&failed);
+        assert_eq!(dto.state, "failed");
+        assert_eq!(dto.code.as_deref(), Some("wda_signature_expired"));
+    }
+
+    /// 占位算「在跑」——第二次并发 start 必须在预检窗口内就被拒。
+    #[test]
+    fn starting_placeholder_blocks_a_second_start() {
+        assert!(ios_slot_is_live(&IosSlot::Starting));
+        assert!(!ios_slot_is_live(&IosSlot::Failed {
+            code: "tunnel_failed"
+        }));
+    }
+
+    /// 环境变量为空串时回退默认值，而不是把空 bundle id 交给 go-ios。
+    #[test]
+    fn wda_ids_fall_back_to_defaults_for_blank_environment_values() {
+        let names = [
+            "QUADCONTROL_WDA_BUNDLE_ID",
+            "QUADCONTROL_WDA_TESTRUNNER_ID",
+            "QUADCONTROL_WDA_XCTESTCONFIG",
+        ];
+        let previous = names.map(std::env::var_os);
+        for name in names {
+            std::env::set_var(name, "   ");
+        }
+        let ids = wda_ids_from_env();
+        assert_eq!(ids.bundle_id, super::DEFAULT_WDA_BUNDLE_ID);
+        assert_eq!(ids.testrunner_id, super::DEFAULT_WDA_TESTRUNNER_ID);
+        assert_eq!(ids.xctestconfig, super::DEFAULT_WDA_XCTESTCONFIG);
+
+        std::env::set_var("QUADCONTROL_WDA_BUNDLE_ID", "com.example.wda.xctrunner");
+        assert_eq!(
+            wda_ids_from_env().bundle_id,
+            "com.example.wda.xctrunner".to_owned()
+        );
+        for (name, value) in names.iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    /// macOS 的产品路径没有 WDA 链路：没有开发开关就必须拒绝。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_refuses_to_launch_without_the_development_switch() {
+        let previous = std::env::var_os("QUADCONTROL_IOS_DEV_WDA");
+        std::env::remove_var("QUADCONTROL_IOS_DEV_WDA");
+        assert_eq!(
+            super::ios_launch_allowed(),
+            Err("macos_uses_iphone_mirroring".to_owned())
+        );
+        if let Some(value) = previous {
+            std::env::set_var("QUADCONTROL_IOS_DEV_WDA", value);
+        }
+    }
+
+    /// Windows 上收不回进程树，起会话是**有意**拒绝（P6）。
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_to_launch() {
+        assert_eq!(
+            super::ios_launch_allowed(),
+            Err("windows_session_unsupported".to_owned())
         );
     }
 
@@ -1455,7 +1602,11 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
             };
             let ios_store = worker.state::<IosSessionStore>();
             let ios_handles = match ios_store.session.lock() {
-                Ok(mut session) => session.take().into_iter().collect::<Vec<_>>(),
+                // 占位与失败槽位没有子进程可收；真正在跑的只有 `Handle`。
+                Ok(mut session) => match session.take() {
+                    Some(IosSlot::Handle(handle)) => vec![handle],
+                    _ => Vec::new(),
+                },
                 Err(_) => {
                     eprintln!("iOS session store is poisoned during shutdown");
                     Vec::new()
