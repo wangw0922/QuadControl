@@ -15,8 +15,10 @@
 
 use std::fmt;
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 pub mod devices;
 pub mod mjpeg;
@@ -64,8 +66,18 @@ pub enum Error {
     DeviceLocked,
     /// 文字已发出但**回读不含发送内容**，无法确认送达。
     TextUnconfirmed,
+    /// 设备上没有聚焦的输入框，文字无处可送。
+    ///
+    /// 真机上 `GET /session/{s}/element/active` 此时返回 `nosuchelement`。
+    /// 这不是故障，是一个用户自己就能修的状态，所以单独给一个码。
+    NoActiveElement,
     /// 截屏失败（或返回的 base64 无法解码）。
     ScreenshotFailed(String),
+    /// 把应用切到前台失败，且设备**没有**锁定（锁定归 [`Error::DeviceLocked`]）。
+    ///
+    /// 常见原因是应用已被卸载或 bundle id 不对。单独成码，界面才能说「无法切换
+    /// 到该应用」而不是笼统的会话故障。
+    ActivateAppFailed(String),
     /// 已有 iOS 会话在跑；同一时刻最多一个。
     AlreadyRunning,
     /// Windows 暂不支持起会话（无 Job Object 收不回进程树，见 P6）。
@@ -91,7 +103,9 @@ impl Error {
             Self::ProxyFailed(_) => "proxy_failed",
             Self::DeviceLocked => "device_locked",
             Self::TextUnconfirmed => "text_unconfirmed",
+            Self::NoActiveElement => "no_active_element",
             Self::ScreenshotFailed(_) => "screenshot_failed",
+            Self::ActivateAppFailed(_) => "activate_app_failed",
             Self::AlreadyRunning => "ios_session_already_running",
             Self::WindowsSessionUnsupported => "windows_session_unsupported",
             // 方案的错误码表里没有「通用进程错误」这一格。这里自造一个码而不是
@@ -122,10 +136,14 @@ impl fmt::Display for Error {
             | Self::WdaSessionFailed(s)
             | Self::ForwardFailed(s)
             | Self::ProxyFailed(s)
-            | Self::ScreenshotFailed(s) => f.write_str(s),
+            | Self::ScreenshotFailed(s)
+            | Self::ActivateAppFailed(s) => f.write_str(s),
             Self::DeviceLocked => f.write_str("the iPhone is locked; unlock it on the device"),
             Self::TextUnconfirmed => {
                 f.write_str("the text could not be confirmed as delivered; check the iPhone")
+            }
+            Self::NoActiveElement => {
+                f.write_str("no focused text field on the device; tap into a text field first")
             }
             Self::AlreadyRunning => f.write_str("an iOS session is already running"),
             Self::WindowsSessionUnsupported => {
@@ -288,6 +306,138 @@ fn looks_like_usbmuxd_failure(stderr: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+/// 设备上已安装的一个应用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledApp {
+    pub bundle_id: String,
+    /// 显示名。`ios apps --list` 没给名字时是空串，由调用方决定回退策略。
+    pub name: String,
+}
+
+/// `ios apps --list` 的墙钟预算。
+///
+/// 它要走 usbmuxd 问设备要完整的应用清单，比 `ios version` 慢得多；GUI 在会话起来
+/// 后异步跑一次，超时就当作「拿不到名字」，不影响会话本身。
+pub const APPS_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `ios apps --list` 的 stdout 上限。红线：每次子进程调用都要有输出上限。
+const APPS_LIST_STDOUT_LIMIT: usize = 1024 * 1024;
+
+/// 跑 `ios apps --list --udid=<udid>`，返回已安装应用。
+///
+/// 只读 **stdout**：与 [`list_devices`] 同理，go-ios 把结构化日志打到 stderr，
+/// 混进来会让解析失败。这里干脆把 stderr 丢掉（`Stdio::null()`）——它带着 UDID，
+/// 不该被任何错误文案带出去。
+///
+/// 带 [`APPS_LIST_TIMEOUT`] 墙钟预算：超时就 kill 子进程并报
+/// [`Error::Process`]，绝不留孤儿、绝不无界阻塞。
+pub fn installed_apps(ios: &Path, udid: &str) -> Result<Vec<InstalledApp>, Error> {
+    let mut command = Command::new(ios);
+    command
+        .arg("apps")
+        .arg("--list")
+        .arg(format!("--udid={udid}"));
+    let (timed_out, status, stdout) =
+        run_capture_stdout(&mut command, APPS_LIST_TIMEOUT).map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                Error::IosNotFound(ios.to_path_buf())
+            } else {
+                Error::Process(e)
+            }
+        })?;
+    if timed_out {
+        return Err(Error::Process(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "`ios apps --list` did not finish within the time budget",
+        )));
+    }
+    if !status.success() {
+        // 文案里**不**放 argv：那里有 UDID。
+        return Err(Error::Process(io::Error::other(format!(
+            "`ios apps --list` exited with {}",
+            status.code().unwrap_or(-1)
+        ))));
+    }
+    Ok(parse_installed_apps(&String::from_utf8_lossy(&stdout)))
+}
+
+/// 跑一个子进程，带墙钟预算地收 stdout。
+///
+/// 三件事缺一不可：
+/// 1. stdout 必须由**另一条线程**读走。不读而只等的话，子进程写满管道缓冲区就会
+///    卡死，我们的超时会变成「每次都超时」。
+/// 2. 超时要 `kill` + `wait`，不能只是不再等——不 reap 就是留僵尸/孤儿。
+/// 3. 读取有上限（[`APPS_LIST_STDOUT_LIMIT`]），输出异常大时不吃光内存。
+///
+/// 返回 `(是否超时, 退出状态, stdout)`。超时时退出状态是被 kill 的那个。
+fn run_capture_stdout(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<(bool, ExitStatus, Vec<u8>)> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("stdout was not piped"))?;
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        // take 的上限之外的字节被丢弃；子进程会在管道关闭后拿到 EPIPE 退出。
+        let _ = stdout
+            .take(APPS_LIST_STDOUT_LIMIT as u64)
+            .read_to_end(&mut buffer);
+        buffer
+    });
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // 子进程已经走了，管道随之关闭，读线程一定会结束。
+    let stdout = reader.join().unwrap_or_default();
+    Ok((timed_out, status, stdout))
+}
+
+/// 解析 `ios apps --list` 的 stdout。
+///
+/// 每行是 `<bundleId> <name…> <version>`，**名字可以含空格**，版本是最后一段。
+/// 所以按空白切开后：第一段是 bundle id，最后一段是版本，中间全部是名字。
+/// 只有两段时（没有名字）名字留空串，由调用方回退。
+///
+/// 认不出的行**跳过**而不是整体失败：拿不到某个名字只是显示成 bundle id，
+/// 比整张列表消失好。
+pub fn parse_installed_apps(stdout: &str) -> Vec<InstalledApp> {
+    let mut apps = Vec::new();
+    for line in stdout.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        let bundle_id = tokens[0];
+        // bundle id 至少要长得像一个：这挡掉表头、提示行之类的散文。
+        if !bundle_id.contains('.') {
+            continue;
+        }
+        let name = tokens[1..tokens.len() - 1].join(" ");
+        apps.push(InstalledApp {
+            bundle_id: bundle_id.to_owned(),
+            name,
+        });
+    }
+    apps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +481,7 @@ mod tests {
             ),
             (Error::TunnelPortBusy(28100), "tunnel_port_busy"),
             (Error::TunnelFailed(String::new()), "tunnel_failed"),
+            (Error::NoActiveElement, "no_active_element"),
             (Error::WdaNotInstalled(String::new()), "wda_not_installed"),
             (
                 Error::WdaSignatureExpired(String::new()),
@@ -343,6 +494,10 @@ mod tests {
             (Error::DeviceLocked, "device_locked"),
             (Error::TextUnconfirmed, "text_unconfirmed"),
             (Error::ScreenshotFailed(String::new()), "screenshot_failed"),
+            (
+                Error::ActivateAppFailed(String::new()),
+                "activate_app_failed",
+            ),
             (Error::AlreadyRunning, "ios_session_already_running"),
             (
                 Error::WindowsSessionUnsupported,
@@ -352,6 +507,41 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(error.code(), expected);
         }
+    }
+
+    /// 自造 fixture（**不是**真机抓的：真机输出带真实 bundle id 与应用名）。
+    /// 形状照 `ios apps --list`：`<bundleId> <name…> <version>`，名字可含空格。
+    #[test]
+    fn installed_apps_fixture_parses() {
+        let fixture = include_str!("../tests/fixtures/go-ios-1.2.1/ios-apps-list.stdout.txt");
+        let apps = parse_installed_apps(fixture);
+        let names: Vec<(&str, &str)> = apps
+            .iter()
+            .map(|app| (app.bundle_id.as_str(), app.name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("com.example.REDACTED.settings", "Settings"),
+                ("com.example.REDACTED.browser", "Example Web Browser"),
+                ("com.example.REDACTED.notes", "Notes"),
+                ("com.example.REDACTED.noname", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_apps_parser_skips_lines_it_cannot_read() {
+        // 空行、单段行、不像 bundle id 的散文行一律跳过，剩下的照常解析。
+        let parsed = parse_installed_apps(
+            "\n\
+             onlyonetoken\n\
+             Bundle Identifier Name Version\n\
+             com.example.REDACTED.app Example 1.0\n",
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].bundle_id, "com.example.REDACTED.app");
+        assert_eq!(parsed[0].name, "Example");
     }
 
     #[test]

@@ -39,7 +39,7 @@ const messages = {
     err_macos_uses_iphone_mirroring: "在 Mac 上请使用系统自带的「iPhone 镜像」。",
     err_iphone_mirroring_failed: "无法打开「iPhone 镜像」，请在启动台里手动打开。",
     err_unsupported: "当前系统不支持这个操作。",
-    iosStageHint: "iPhone 实时画面\n（点击画面 = 点手机屏幕）",
+    iosStageHint: "iPhone 实时画面\n（点击画面 = 点手机屏幕，拖动 = 滑动）",
     iosConnected: "已连接 · {fps} 帧/秒",
     iosDisconnected: "未连接",
     iosLocked: "手机已锁定，请在手机上解锁后继续",
@@ -51,6 +51,11 @@ const messages = {
     iosCapture: "截取屏幕",
     iosHome: "回到主屏幕",
     iosScreenshotSaved: "已保存到 {path}",
+    iosRecentTitle: "最近使用的应用",
+    iosRecentDescription:
+      "iOS 的多任务界面无法从电脑调出，这里列出本次会话切换过的应用。",
+    iosRecentEmpty: "切换过的应用会出现在这里。",
+    err_activate_app_failed: "无法切换到该应用。",
     iosSoundTitle: "声音保留在手机上",
     iosSoundDescription: "iPhone 的声音暂时无法转发到电脑，这是系统限制。",
     iosLimitsTitle: "iPhone 控制的已知限制",
@@ -67,6 +72,7 @@ const messages = {
     iosMirroringUnavailable: "需要 macOS 15 及以上",
     iosSessionElsewhere: "已有 iPhone 会话在运行",
     err_ios_link_lost: "iPhone 链路已中断，请重新连接。",
+    err_no_active_element: "手机上没有聚焦的输入框，请先在手机上点进一个输入框再发送。",
     err_unknown: "设备发现暂时不可用。",
     showMirror: "显示镜像窗口",
     disconnect: "断开连接",
@@ -175,7 +181,7 @@ const messages = {
     err_macos_uses_iphone_mirroring: "On a Mac, use Apple's own iPhone Mirroring.",
     err_iphone_mirroring_failed: "iPhone Mirroring could not be opened. Open it from Launchpad instead.",
     err_unsupported: "This operating system does not support that action.",
-    iosStageHint: "iPhone live view\n(click the view = tap the phone)",
+    iosStageHint: "iPhone live view\n(click to tap, drag to swipe)",
     iosConnected: "Connected · {fps} fps",
     iosDisconnected: "Not connected",
     iosLocked: "The phone is locked — unlock it on the phone to continue",
@@ -187,6 +193,11 @@ const messages = {
     iosCapture: "Capture screen",
     iosHome: "Go to the home screen",
     iosScreenshotSaved: "Saved to {path}",
+    iosRecentTitle: "Recent apps",
+    iosRecentDescription:
+      "iOS's app switcher cannot be opened from the computer; this lists the apps used in this session.",
+    iosRecentEmpty: "Apps you switch to will show up here.",
+    err_activate_app_failed: "Could not switch to that app.",
     iosSoundTitle: "Sound stays on the phone",
     iosSoundDescription: "iPhone audio cannot be forwarded to this computer; that is a system limitation.",
     iosLimitsTitle: "Known limits of iPhone control",
@@ -203,6 +214,7 @@ const messages = {
     iosMirroringUnavailable: "Requires macOS 15 or newer",
     iosSessionElsewhere: "An iPhone session is already running",
     err_ios_link_lost: "The iPhone link was lost. Reconnect to continue.",
+    err_no_active_element: "No text field is focused on the phone. Tap into a text field on the phone first.",
     err_unknown: "Device discovery is temporarily unavailable.",
     showMirror: "Show mirror window",
     disconnect: "Disconnect",
@@ -335,6 +347,9 @@ const iosWakeButton = document.querySelector("#ios-wake");
 const iosCaptureButton = document.querySelector("#ios-capture");
 const iosHomeButton = document.querySelector("#ios-home");
 const iosMirroringCard = document.querySelector("#ios-mirroring-card");
+const iosRecentCard = document.querySelector("#ios-recent-card");
+const iosRecentList = document.querySelector("#ios-recent-list");
+const iosRecentEmpty = document.querySelector("#ios-recent-empty");
 const openMirroringButton = document.querySelector("#open-mirroring");
 const mirroringNote = document.querySelector("#mirroring-note");
 
@@ -354,7 +369,15 @@ let iosStatus = { state: "idle", fps: 0 };
 /// 代价是 WebView 重载会丢掉这个关联（会话仍在后台跑，状态卡照样能断开）。
 let iosSessionDeviceId;
 let iosStreaming = false;
+/// 上一次因 `<img>` 报错而重设 `src` 的时刻；下面的兜底重连靠它限流。
+let iosStreamRetryAt = 0;
 let iosPollInFlight = false;
+/// 上一次画出来的「最近使用的应用」列表指纹。
+///
+/// 名字会**后到**：`ios apps --list` 要跑好几秒，先看到的应用一开始只有回退名，
+/// 清单落地后同一个 bundle id 的名字会变。所以指纹里必须同时含 bundle id 和名字，
+/// 只比 bundle id 的话那次改名永远画不出来。
+let iosRecentKey;
 
 function iosSessionIsLive(state) {
   return state === "starting" || state === "running" || state === "stopping";
@@ -657,6 +680,10 @@ function iosViewModel({ status, ownsSelected, guidanceOnly, platform }) {
     actionDisabled: state === "starting" || state === "stopping" || (windowsBlocked && !isDisconnect),
     textEnabled: running && !locked,
     actionsEnabled: running,
+    // 切换应用是写操作：只在会话运行时可用。锁定时**不**在这里挡——后端
+    // `activate_app` 会以 `device_locked` 拒绝，用户能看到为什么。
+    recentEnabled: running,
+    recentApps: status.recent_apps ?? [],
     aspectRatio: running && status.window ? `${status.window.width} / ${status.window.height}` : "",
     shouldStream: !guidanceOnly && ownsSelected && running && Boolean(status.proxy_port),
     proxyPort: status.proxy_port,
@@ -686,6 +713,7 @@ function renderIosPanel() {
   iosStageColumn.hidden = isMac;
   iosTextCard.hidden = isMac;
   iosActionCard.hidden = isMac;
+  iosRecentCard.hidden = isMac;
   iosMirroringCard.hidden = !isMac;
   if (isMac) {
     openMirroringButton.disabled = !mirroringAvailable;
@@ -724,10 +752,29 @@ function applyIosStatus() {
   [iosWakeButton, iosCaptureButton, iosHomeButton].forEach((button) => {
     button.disabled = !view.actionsEnabled;
   });
+  renderIosRecentApps(view);
 
   syncIosStream();
   iosStagePlaceholder.hidden = iosStreaming;
 }
+
+/// 画面兜底重连。
+///
+/// 真机（iPhone SE 3 + macOS WKWebView，2026-09-15）：代理那条连接一旦被关掉，
+/// `<img>` 就**永远停在最后一帧、不会自动重连**——「WebKit 对 MJPEG 会自行重连」
+/// 的假设不成立。代理已改成广播给所有下游、不再踢人，这里只是兜底：真的断了就
+/// 重设一次 `src`（同 URL 加时间戳防缓存），最多每 2 s 一次。
+///
+/// **如实说明**：WKWebView 在流中途被断开时到底会不会触发 `error`，尚未实测；
+/// 所以这条兜底不能声称一定能救回冻帧的场景。主规则不变：`src` 只在状态迁移时设。
+iosStream.addEventListener("error", () => {
+  // 只在「本来就该在放流」时重连；清空 src 的那一下不该被当成故障。
+  if (!iosStreaming || !iosStatus.proxy_port) return;
+  const now = Date.now();
+  if (now - iosStreamRetryAt < 2000) return;
+  iosStreamRetryAt = now;
+  iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/?t=${now}`;
+});
 
 /// MJPEG 是无限流：`src` **只在状态迁移时**设置或清空。每秒重设会让画面每秒重连。
 function syncIosStream() {
@@ -736,6 +783,7 @@ function syncIosStream() {
   if (shouldStream === iosStreaming) return;
   iosStreaming = shouldStream;
   if (shouldStream) {
+    iosStreamRetryAt = 0;
     iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/`;
   } else {
     iosStream.removeAttribute("src");
@@ -822,6 +870,35 @@ async function handleIosSessionAction(device) {
   renderDevices();
 }
 
+/// 每秒轮询都会走到这里，但**只在列表真的变了**的时候重建 DOM；
+/// 其余时候只改 `disabled`，免得每秒把按钮全换一遍（点击会被吃掉）。
+function renderIosRecentApps(view) {
+  const apps = view.recentApps;
+  const key = apps.map((app) => `${app.bundle_id}\u0000${app.name}`).join("\u001f");
+  if (key !== iosRecentKey) {
+    iosRecentKey = key;
+    iosRecentList.replaceChildren();
+    apps.forEach((app) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn btn-secondary";
+      button.textContent = app.name;
+      // 名字被截断时，完整名字还能靠悬停看到。
+      button.title = app.name;
+      button.addEventListener("click", () => {
+        invokeIosAction("ios_activate_app", { bundleId: app.bundle_id }, () => {
+          iosActionResult.hidden = true;
+        });
+      });
+      iosRecentList.append(button);
+    });
+  }
+  iosRecentEmpty.hidden = apps.length > 0;
+  iosRecentList.querySelectorAll("button").forEach((button) => {
+    button.disabled = !view.recentEnabled;
+  });
+}
+
 function showIosNote(target, message) {
   target.textContent = message;
   target.hidden = false;
@@ -837,9 +914,53 @@ async function invokeIosAction(command, args, onSuccess) {
   }
 }
 
-iosStage.addEventListener("click", async (event) => {
-  if (!iosOwnsSelectedDevice() || iosStatus.state !== "running") return;
-  // 锁定时点画面 = 唤醒屏幕，不转发点按（锁屏下点按不产生效果）。
+/// 画面上的指针手势：位移小 = 点按，位移大 = 滑动。
+///
+/// 用 pointer 事件而不是 `click`：`click` 拿不到按下/抬起两点，没法区分点按和
+/// 滑动。按下时 `setPointerCapture`（捕获在 stage 上，不是 `<img>` 上），拖出
+/// 容器也不会丢掉抬起事件。
+const TAP_SLOP_PX = 8;
+const SWIPE_MIN_MS = 50;
+const SWIPE_MAX_MS = 2000;
+/// 当前按下的手势；没按下时是 undefined。
+let iosGesture;
+
+function iosStageInteractive() {
+  return iosOwnsSelectedDevice() && iosStatus.state === "running";
+}
+
+iosStage.addEventListener("pointerdown", (event) => {
+  if (!iosStageInteractive()) return;
+  // 只认主指针的主键：右键菜单和多指的第二根手指都不该触发手势。
+  if (event.button !== 0 || !event.isPrimary) return;
+  const rect = iosStage.getBoundingClientRect();
+  iosGesture = {
+    pointerId: event.pointerId,
+    xPx: event.clientX - rect.left,
+    yPx: event.clientY - rect.top,
+    at: performance.now(),
+  };
+  try {
+    iosStage.setPointerCapture(event.pointerId);
+  } catch (error) {
+    // 捕获失败不致命：手势照走，只是拖出容器可能丢掉抬起事件。
+    console.warn("setPointerCapture failed", error);
+  }
+  // 拖动时不要选中占位文字。
+  event.preventDefault();
+});
+
+iosStage.addEventListener("pointercancel", (event) => {
+  if (iosGesture && iosGesture.pointerId === event.pointerId) iosGesture = undefined;
+});
+
+iosStage.addEventListener("pointerup", async (event) => {
+  const gesture = iosGesture;
+  if (!gesture || gesture.pointerId !== event.pointerId) return;
+  iosGesture = undefined;
+  // 按下到抬起之间状态可能变（会话断了、切了设备），抬起时再核一次。
+  if (!iosStageInteractive()) return;
+  // 锁定时任何手势都只等于「唤醒屏幕」：锁屏下点按与滑动都不产生效果。
   if (iosStatus.locked === true) {
     await invokeIosAction("ios_wake", undefined, () => {
       iosActionResult.hidden = true;
@@ -847,18 +968,37 @@ iosStage.addEventListener("click", async (event) => {
     return;
   }
   const rect = iosStage.getBoundingClientRect();
-  // 传容器内像素坐标 + 容器尺寸，由后端按设备长宽比算内容矩形并归一化。
+  const xPx = event.clientX - rect.left;
+  const yPx = event.clientY - rect.top;
+  const moved = Math.hypot(xPx - gesture.xPx, yPx - gesture.yPx);
+  const clear = () => {
+    iosActionResult.hidden = true;
+  };
+  if (moved < TAP_SLOP_PX) {
+    // 传容器内像素坐标 + 容器尺寸，由后端按设备长宽比算内容矩形并归一化。
+    await invokeIosAction(
+      "ios_tap",
+      { xPx: gesture.xPx, yPx: gesture.yPx, widthPx: rect.width, heightPx: rect.height },
+      clear,
+    );
+    return;
+  }
+  // 时长取按下到抬起的实际时间，钳制同后端（后端会再钳一次，这里只是少发废值）。
+  const durationMs = Math.round(
+    Math.min(Math.max(performance.now() - gesture.at, SWIPE_MIN_MS), SWIPE_MAX_MS),
+  );
   await invokeIosAction(
-    "ios_tap",
+    "ios_swipe",
     {
-      xPx: event.clientX - rect.left,
-      yPx: event.clientY - rect.top,
+      fromXPx: gesture.xPx,
+      fromYPx: gesture.yPx,
+      toXPx: xPx,
+      toYPx: yPx,
       widthPx: rect.width,
       heightPx: rect.height,
+      durationMs,
     },
-    () => {
-      iosActionResult.hidden = true;
-    },
+    clear,
   );
 });
 

@@ -968,6 +968,18 @@ button:disabled {
   cursor: pointer;
 }
 
+/* 滑动手势的前提：画面区不许被浏览器当成可选中文本或可拖拽内容，否则
+   pointermove 会被原生拖放/选区接管，手势以 pointercancel 收场。 */
+.ios-stage {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ios-stream {
+  -webkit-user-drag: none;
+}
+
 /* `contain` 是坐标换算的前提：后端按同一规则算内容矩形（`content_point`）。
    换成 cover 或 fill，点按就会整体偏移。 */
 .ios-stream {
@@ -1019,6 +1031,34 @@ button:disabled {
   flex-direction: row;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.ios-recent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--space-3);
+}
+
+.ios-recent-card h2 {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ios-recent-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 应用名可以很长；按钮里截断，不把整张卡撑开。 */
+.ios-recent-list .btn {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ios-note {

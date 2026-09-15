@@ -11,3 +11,8 @@ DerivedData/
 .vscode/
 /agents/android-shell/server/build/
 多平台UI设计项目.zip
+
+# go-ios writes its pairing identity (private key) into the cwd; never commit it
+selfIdentity.plist
+# third-party WebDriverAgent checkout used for real-device acceptance
+/WebDriverAgent/

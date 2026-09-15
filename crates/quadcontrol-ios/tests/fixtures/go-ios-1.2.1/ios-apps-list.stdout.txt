@@ -1,0 +1,4 @@
+com.example.REDACTED.settings Settings 1.0
+com.example.REDACTED.browser Example Web Browser 140.0.7339.1
+com.example.REDACTED.notes Notes 2.3
+com.example.REDACTED.noname 1.0

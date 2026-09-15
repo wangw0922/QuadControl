@@ -369,6 +369,12 @@ struct IosSessionStore {
     session: Mutex<Option<IosSlot>>,
     next_id: AtomicU64,
     meta: Mutex<IosMeta>,
+    /// 当前会话的设备 UDID。
+    ///
+    /// **不放在 [`IosMeta`] 里**：`ios_session_status` 在非 running 的每一轮都把
+    /// meta 整个重置，UDID 会在 `Starting` 期间就被抹掉，而我们恰恰要在会话起来的
+    /// 那一刻用它去跑 `ios apps --list`。只存在内存里，不落盘、不进 DTO。
+    device_id: Mutex<Option<String>>,
 }
 
 /// 会话槽位。
@@ -415,6 +421,93 @@ struct IosMeta {
     frames: Option<(u64, Instant)>,
     fps: u32,
     window: Option<WindowSize>,
+    /// 上一轮的锁定状态。`wda/unlock` 在有密码的手机上会阻塞约 8 s，WDA 串行
+    /// 处理请求，这期间的 `locked()` 会撞 5 s 超时；若把它降成 None，前端会把
+    /// 锁定条隐藏、文字卡重新可用，等于在唤醒过程中闪成「未锁定」。
+    locked: Option<bool>,
+    /// 本次会话里见过的前台应用，**最新在前**，至多 [`RECENT_APPS_LIMIT`] 个。
+    recent_apps: Vec<RecentApp>,
+    /// bundle id → 显示名，来自一次性的 `ios apps --list`。None = 还没拿到
+    /// （或拿失败了），名字回退成 bundle id 的最后一段。
+    installed: Option<HashMap<String, String>>,
+    /// `ios apps --list` 已经为**哪个会话**发起过。它要跑好几秒，一个会话只跑一次。
+    ///
+    /// 存会话 id 而不是 bool：断开再连时 meta 会被重置，bool 会归假，于是上一次
+    /// 还没回来的那条 `ios apps --list` 之外又起一条，同一台设备上就有两个
+    /// go-ios 子进程——正是 `Starting` 占位要防的那种形状。
+    installed_requested: Option<u64>,
+    /// 状态轮询的计数。`activeAppInfo` 真机要 0.24 s，所以每 2 轮才查一次。
+    polls: u64,
+    /// 这份 meta 属于哪个会话。异步回来的 `ios apps --list` 靠它判断自己是不是
+    /// 已经过期（慢查询回来时会话可能已经换了一代）。
+    session_id: Option<u64>,
+}
+
+/// 「最近使用的应用」里的一项。
+///
+/// `name` 是 `Option`：`activeAppInfo` 报 bundle id 的那一刻 `ios apps --list`
+/// 往往还没回来，名字要等它落地后**在 DTO 构建时**再解析一次，否则整个会话都
+/// 停在回退名上。
+struct RecentApp {
+    bundle_id: String,
+    name: Option<String>,
+}
+
+/// 「最近使用的应用」列表上限。
+const RECENT_APPS_LIMIT: usize = 8;
+
+/// 主屏（SpringBoard）的 bundle id。它不是「应用」，不进列表。
+const SPRINGBOARD_BUNDLE_ID: &str = "com.apple.springboard";
+
+/// 记下一个刚被看到的前台应用。
+///
+/// 规则：SpringBoard 不记；已经在列表里的移到最前（不重复）；超出上限砍掉最旧的。
+/// `installed` 有的话顺手把名字填上，没有就留 None 等后面解析。
+fn remember_recent_app(
+    list: &mut Vec<RecentApp>,
+    bundle_id: &str,
+    installed: Option<&HashMap<String, String>>,
+) {
+    if bundle_id.is_empty() || bundle_id.eq_ignore_ascii_case(SPRINGBOARD_BUNDLE_ID) {
+        return;
+    }
+    list.retain(|app| app.bundle_id != bundle_id);
+    list.insert(
+        0,
+        RecentApp {
+            bundle_id: bundle_id.to_owned(),
+            name: installed.and_then(|map| map.get(bundle_id).cloned()),
+        },
+    );
+    list.truncate(RECENT_APPS_LIMIT);
+}
+
+/// 一个应用的显示名：已记下的名字 → `ios apps --list` → bundle id 的最后一段。
+///
+/// 最后那层回退保证按钮**永远有字**：`ios apps --list` 可能超时、可能失败，
+/// 界面上不该出现一个空按钮。
+fn app_display_name(
+    bundle_id: &str,
+    name: Option<&str>,
+    installed: Option<&HashMap<String, String>>,
+) -> String {
+    let from_installed = installed
+        .and_then(|map| map.get(bundle_id))
+        .map(String::as_str);
+    name.or(from_installed)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| fallback_app_name(bundle_id))
+}
+
+/// 没有名字时的回退：bundle id 的最后一段（`com.example.notes` → `notes`）。
+fn fallback_app_name(bundle_id: &str) -> String {
+    bundle_id
+        .rsplit('.')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(bundle_id)
+        .to_owned()
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -436,6 +529,17 @@ struct IosStatusDto {
     fps: u32,
     locked: Option<bool>,
     window: Option<WindowDto>,
+    /// 「最近使用的应用」，最新在前。
+    ///
+    /// bundle id **不是**设备标识（它是应用的标识，不是这台手机的），所以可以进
+    /// DTO；UDID 与 stderr 尾部仍然绝不进。
+    recent_apps: Vec<RecentAppDto>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RecentAppDto {
+    bundle_id: String,
+    name: String,
 }
 
 fn ios_idle_dto() -> IosStatusDto {
@@ -447,6 +551,7 @@ fn ios_idle_dto() -> IosStatusDto {
         fps: 0,
         locked: None,
         window: None,
+        recent_apps: Vec::new(),
     }
 }
 
@@ -518,6 +623,28 @@ fn content_point(
         return None;
     }
     Some((normalized_x * window_w, normalized_y * window_h))
+}
+
+/// 滑动两端都过 [`content_point`]。任一端落在黑边上就返回 None——半截滑动比
+/// 不滑更糟：起点或终点会被截到内容边缘，手势方向都可能变。
+fn content_segment(
+    from_px: (f64, f64),
+    to_px: (f64, f64),
+    container_w: f64,
+    container_h: f64,
+    window: WindowSize,
+) -> Option<((f64, f64), (f64, f64))> {
+    let from = content_point(from_px.0, from_px.1, container_w, container_h, window)?;
+    let to = content_point(to_px.0, to_px.1, container_w, container_h, window)?;
+    Some((from, to))
+}
+
+/// 滑动时长的钳制区间（毫秒），与 `wda::SWIPE_MIN_SECS` / `SWIPE_MAX_SECS` 对齐。
+const SWIPE_MIN_MS: u64 = 50;
+const SWIPE_MAX_MS: u64 = 2_000;
+
+fn clamp_swipe_ms(duration_ms: u64) -> u64 {
+    duration_ms.clamp(SWIPE_MIN_MS, SWIPE_MAX_MS)
 }
 
 /// 取一个可用的 WDA 客户端；会话没在跑就是 `ios_session_not_running`。
@@ -644,6 +771,10 @@ async fn start_ios_session(
 ) -> Result<(), String> {
     ios_launch_allowed()?;
     let store = store.inner();
+    // 记下 UDID：会话起来之后要用它跑一次 `ios apps --list` 拿应用名。
+    if let Ok(mut current) = store.device_id.lock() {
+        *current = Some(device_id.clone());
+    }
     let id = {
         let mut session = store
             .session
@@ -716,6 +847,9 @@ async fn start_ios_session(
 #[tauri::command]
 async fn stop_ios_session(store: tauri::State<'_, IosSessionStore>) -> Result<(), String> {
     let store = store.inner();
+    if let Ok(mut current) = store.device_id.lock() {
+        *current = None;
+    }
     let session = store
         .session
         .lock()
@@ -735,6 +869,7 @@ async fn stop_ios_session(store: tauri::State<'_, IosSessionStore>) -> Result<()
 
 #[tauri::command]
 async fn ios_session_status(
+    app: tauri::AppHandle,
     store: tauri::State<'_, IosSessionStore>,
 ) -> Result<IosStatusDto, String> {
     let store = store.inner();
@@ -744,11 +879,16 @@ async fn ios_session_status(
             .lock()
             .map_err(|_| "ios_process_error".to_owned())?;
         session.as_ref().map(|slot| match slot {
-            IosSlot::Handle(handle) => (handle.status(), handle.stats().frames, handle.client()),
-            placeholder => (slot_status(placeholder), 0, None),
+            IosSlot::Handle(handle) => (
+                handle.status(),
+                handle.stats().frames,
+                handle.client(),
+                handle.id(),
+            ),
+            placeholder => (slot_status(placeholder), 0, None, 0),
         })
     };
-    let Some((status, frames, client)) = snapshot else {
+    let Some((status, frames, client, session_id)) = snapshot else {
         return Ok(ios_idle_dto());
     };
     let mut dto = ios_status_dto(&status);
@@ -756,12 +896,27 @@ async fn ios_session_status(
         if let Ok(mut meta) = store.meta.lock() {
             *meta = IosMeta::default();
         }
+        // 会话自亡（`Exited` / `Failed`）时也要把 UDID 丢掉，不只是显式 stop 的
+        // 那条路——设备标识不该活得比它所属的会话久。**但 `Starting` 不算**：
+        // 真机上启动要 10–15 s，这里每秒跑一轮，第一轮就清掉的话
+        // `ios apps --list` 永远拿不到 UDID（复审抓到的结构性 bug）。
+        if matches!(dto.state.as_str(), "exited" | "failed") {
+            if let Ok(mut current) = store.device_id.lock() {
+                *current = None;
+            }
+        }
         return Ok(dto);
     }
     let now = Instant::now();
+    // 每 2 轮查一次前台应用：`activeAppInfo` 真机要 0.24 s，每秒都查会让这条
+    // 轮询链路凭空多花四分之一秒。
+    let mut query_active = false;
     if let Ok(mut meta) = store.meta.lock() {
+        meta.session_id = Some(session_id);
         meta.fps = diff_fps(meta.frames, frames, now, meta.fps);
         meta.frames = Some((frames, now));
+        meta.polls = meta.polls.wrapping_add(1);
+        query_active = meta.polls % 2 == 1;
         dto.fps = meta.fps;
         dto.window = meta.window.map(|window| WindowDto {
             width: window.width,
@@ -769,14 +924,27 @@ async fn ios_session_status(
         });
     }
     if let Some(client) = client {
-        // 两次查询各自带 5 秒超时（`wda::REQUEST_TIMEOUT`）；查不到就保持原值，
+        // 三次查询各自带 5 秒超时（`wda::REQUEST_TIMEOUT`）；查不到就保持原值，
         // 不把一次瞬时超时升级成「会话失败」。
-        let (locked, window) = tauri::async_runtime::spawn_blocking(move || {
-            (client.locked().ok(), client.window_size().ok())
+        let (locked, window, active) = tauri::async_runtime::spawn_blocking(move || {
+            (
+                client.locked().ok(),
+                client.window_size().ok(),
+                query_active.then(|| client.active_app().ok()).flatten(),
+            )
         })
         .await
-        .unwrap_or((None, None));
-        dto.locked = locked;
+        .unwrap_or((None, None, None));
+        dto.locked = match locked {
+            Some(value) => {
+                if let Ok(mut meta) = store.meta.lock() {
+                    meta.locked = Some(value);
+                }
+                Some(value)
+            }
+            // 查询超时：沿用上一轮，不把「没查到」升级成「未锁定」。
+            None => store.meta.lock().ok().and_then(|meta| meta.locked),
+        };
         if let Some(window) = window {
             dto.window = Some(WindowDto {
                 width: window.width,
@@ -786,8 +954,99 @@ async fn ios_session_status(
                 meta.window = Some(window);
             }
         }
+        if let (Some(active), Ok(mut meta)) = (active, store.meta.lock()) {
+            // 分开借两个字段，免得为了一次查表把 `installed` 搬来搬去。
+            let IosMeta {
+                recent_apps,
+                installed,
+                ..
+            } = &mut *meta;
+            remember_recent_app(recent_apps, &active.bundle_id, installed.as_ref());
+        }
     }
+    // 名字在**这里**解析，不是在记录的那一刻：`ios apps --list` 要跑好几秒，
+    // 先见到的应用当时只有回退名，它落地后这一轮就自动换成真名。
+    if let Ok(meta) = store.meta.lock() {
+        dto.recent_apps = meta
+            .recent_apps
+            .iter()
+            .map(|app| RecentAppDto {
+                name: app_display_name(
+                    &app.bundle_id,
+                    app.name.as_deref(),
+                    meta.installed.as_ref(),
+                ),
+                bundle_id: app.bundle_id.clone(),
+            })
+            .collect();
+    }
+    spawn_installed_apps_load(&app, store, session_id);
     Ok(dto)
+}
+
+/// 会话起来后异步跑一次 `ios apps --list`，只为把 bundle id 换成应用名。
+///
+/// 三条约束：
+/// 1. **一个会话只跑一次**（`installed_requested` 闸），它在真机上要好几秒。
+/// 2. **不进状态轮询那条 `spawn_blocking`**：那条链路每秒跑一次，塞进去会把
+///    整个面板卡住好几秒。
+/// 3. 回来时核对 `session_id`：慢查询回来时会话可能已经换了一代，那份结果要丢掉，
+///    不能算到下一个会话头上。
+///
+/// 失败一律吞掉（只写本进程 stderr）：拿不到名字只是显示成 bundle id 的最后一段。
+fn spawn_installed_apps_load(app: &tauri::AppHandle, store: &IosSessionStore, session_id: u64) {
+    // 先取 UDID 再拿 meta 锁：两把锁不嵌套，就不会有加锁顺序的问题。
+    let Some(udid) = store
+        .device_id
+        .lock()
+        .ok()
+        .and_then(|current| current.clone())
+    else {
+        return;
+    };
+    {
+        let Ok(mut meta) = store.meta.lock() else {
+            return;
+        };
+        if meta.installed_requested == Some(session_id) {
+            return;
+        }
+        meta.installed_requested = Some(session_id);
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let loaded = tauri::async_runtime::spawn_blocking(move || {
+            let ios = quadcontrol_ios::resolve_ios(None);
+            quadcontrol_ios::installed_apps(&ios, &udid)
+        })
+        .await;
+        let apps = match loaded {
+            Ok(Ok(apps)) => apps,
+            Ok(Err(error)) => {
+                eprintln!("`ios apps --list` failed: {error}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("`ios apps --list` worker failed: {error}");
+                return;
+            }
+        };
+        let store = app.state::<IosSessionStore>();
+        let Ok(mut meta) = store.meta.lock() else {
+            return;
+        };
+        // 会话换代了：这份名字属于上一个会话，丢掉。
+        if meta.session_id != Some(session_id) {
+            return;
+        }
+        meta.installed = Some(
+            apps.into_iter()
+                .filter(|app| !app.name.trim().is_empty())
+                .map(|app| (app.bundle_id, app.name))
+                .collect(),
+        );
+    });
 }
 
 #[tauri::command]
@@ -825,12 +1084,73 @@ async fn ios_tap(
     })
 }
 
+/// 画面上拖动 = 手机上滑动。坐标同 [`ios_tap`]：容器内像素 + 容器尺寸，
+/// 由后端算内容矩形。
+///
+/// 两端都过 [`content_segment`]；任一端在黑边上就整段不转发（返回 Ok，不是错误——
+/// 与点按一致，用户拖到画面外不该弹一条报错）。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn ios_swipe(
+    store: tauri::State<'_, IosSessionStore>,
+    from_x_px: f64,
+    from_y_px: f64,
+    to_x_px: f64,
+    to_y_px: f64,
+    width_px: f64,
+    height_px: f64,
+    duration_ms: u64,
+) -> Result<(), String> {
+    let store = store.inner();
+    let cached = store.meta.lock().ok().and_then(|meta| meta.window);
+    let client = ios_client(store)?;
+    let duration_secs = clamp_swipe_ms(duration_ms) as f64 / 1000.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        let window = match cached {
+            Some(window) => window,
+            None => client.window_size()?,
+        };
+        match content_segment(
+            (from_x_px, from_y_px),
+            (to_x_px, to_y_px),
+            width_px,
+            height_px,
+            window,
+        ) {
+            // 有一端在黑边上：不转发，也不是错误。
+            None => Ok(()),
+            Some((from, to)) => client.swipe(from, to, duration_secs),
+        }
+    })
+    .await
+    .map_err(|error| {
+        eprintln!("iOS swipe worker failed: {error}");
+        "ios_process_error".to_owned()
+    })?
+    .map_err(|error| {
+        eprintln!("iOS swipe failed: {error}");
+        error.code().to_owned()
+    })
+}
+
 #[tauri::command]
 async fn ios_send_text(
     store: tauri::State<'_, IosSessionStore>,
     text: String,
 ) -> Result<(), String> {
     ios_call(store.inner(), move |client| client.send_text(&text)).await
+}
+
+/// 把一个应用切到前台（「最近使用的应用」卡的按钮）。
+///
+/// iOS 的多任务卡片界面从电脑这侧**不可达**，这是它的等价物：GUI 记住本次会话里
+/// 见过的前台应用，一键切回去。
+#[tauri::command]
+async fn ios_activate_app(
+    store: tauri::State<'_, IosSessionStore>,
+    bundle_id: String,
+) -> Result<(), String> {
+    ios_call(store.inner(), move |client| client.activate_app(&bundle_id)).await
 }
 
 #[tauri::command]
@@ -897,11 +1217,14 @@ async fn open_iphone_mirroring() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        content_point, diff_fps, ios_slot_is_live, ios_status_dto, pairing_status_from,
-        screenshot_path, set_pairing_result, slot_status, wda_ids_from_env, ExitReason,
-        IosSessionStatus, IosSlot, PairingState, PairingStore, WindowDto, WindowSize,
+        app_display_name, clamp_swipe_ms, content_point, content_segment, diff_fps,
+        fallback_app_name, ios_slot_is_live, ios_status_dto, pairing_status_from,
+        remember_recent_app, screenshot_path, set_pairing_result, slot_status, wda_ids_from_env,
+        ExitReason, IosSessionStatus, IosSlot, PairingState, PairingStore, RecentApp, WindowDto,
+        WindowSize, RECENT_APPS_LIMIT, SPRINGBOARD_BUNDLE_ID,
     };
     use chrono::TimeZone;
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -993,6 +1316,31 @@ mod tests {
         assert!(content_point(187.5, 820.0, 375.0, 867.0, SE3).is_none());
     }
 
+    /// 滑动两端各自过 `content_point`：都在内容里才转发。
+    #[test]
+    fn swipe_maps_both_endpoints_through_the_content_rect() {
+        // 容器 500×667 比设备宽：左右各 62.5px 黑边。
+        let ((from_x, from_y), (to_x, to_y)) =
+            content_segment((250.0, 600.0), (250.0, 100.0), 500.0, 667.0, SE3).unwrap();
+        approx((from_x, from_y), (187.5, 600.0));
+        approx((to_x, to_y), (187.5, 100.0));
+    }
+
+    /// 任一端落在黑边上 → 整段不转发。半截滑动会改变手势方向，比不滑更糟。
+    #[test]
+    fn swipe_is_dropped_when_either_endpoint_is_on_a_bar() {
+        assert!(content_segment((10.0, 333.5), (250.0, 100.0), 500.0, 667.0, SE3).is_none());
+        assert!(content_segment((250.0, 333.5), (490.0, 100.0), 500.0, 667.0, SE3).is_none());
+    }
+
+    /// 时长钳制在 50–2000 ms，与 `wda::swipe` 的秒级区间对齐。
+    #[test]
+    fn swipe_duration_is_clamped_to_the_documented_window() {
+        assert_eq!(clamp_swipe_ms(0), 50);
+        assert_eq!(clamp_swipe_ms(300), 300);
+        assert_eq!(clamp_swipe_ms(60_000), 2_000);
+    }
+
     #[test]
     fn tap_rejects_degenerate_containers_and_windows() {
         assert!(content_point(1.0, 1.0, 0.0, 667.0, SE3).is_none());
@@ -1072,6 +1420,99 @@ mod tests {
         assert_eq!(failed.code.as_deref(), Some("wda_unreachable"));
     }
 
+    fn recent_ids(list: &[RecentApp]) -> Vec<&str> {
+        list.iter().map(|app| app.bundle_id.as_str()).collect()
+    }
+
+    /// 同一个应用再次回到前台只是**提到最前**，不产生第二项。
+    #[test]
+    fn recent_apps_deduplicate_and_move_to_the_front() {
+        let mut list = Vec::new();
+        remember_recent_app(&mut list, "com.example.REDACTED.a", None);
+        remember_recent_app(&mut list, "com.example.REDACTED.b", None);
+        remember_recent_app(&mut list, "com.example.REDACTED.a", None);
+        assert_eq!(
+            recent_ids(&list),
+            vec!["com.example.REDACTED.a", "com.example.REDACTED.b"]
+        );
+    }
+
+    /// 超出上限时砍掉**最旧**的那一项。
+    #[test]
+    fn recent_apps_are_capped_at_the_limit() {
+        let mut list = Vec::new();
+        for index in 0..(RECENT_APPS_LIMIT + 3) {
+            remember_recent_app(&mut list, &format!("com.example.REDACTED.app{index}"), None);
+        }
+        assert_eq!(list.len(), RECENT_APPS_LIMIT);
+        // 最新在前，最旧的三个已经被挤出去。
+        assert_eq!(
+            list[0].bundle_id,
+            format!("com.example.REDACTED.app{}", RECENT_APPS_LIMIT + 2)
+        );
+        assert!(!recent_ids(&list).contains(&"com.example.REDACTED.app0"));
+    }
+
+    /// 主屏不是「应用」：SpringBoard 与空 bundle id 都不进列表。
+    #[test]
+    fn recent_apps_exclude_springboard_and_empty_ids() {
+        let mut list = Vec::new();
+        remember_recent_app(&mut list, SPRINGBOARD_BUNDLE_ID, None);
+        remember_recent_app(&mut list, "COM.APPLE.SPRINGBOARD", None);
+        remember_recent_app(&mut list, "", None);
+        assert!(list.is_empty());
+    }
+
+    /// 名字解析的三层：记下的名字 → `ios apps --list` → bundle id 最后一段。
+    #[test]
+    fn app_names_fall_back_to_the_last_bundle_id_segment() {
+        let mut installed = HashMap::new();
+        installed.insert(
+            "com.example.REDACTED.browser".to_owned(),
+            "Example Web Browser".to_owned(),
+        );
+        assert_eq!(
+            app_display_name("com.example.REDACTED.browser", None, Some(&installed)),
+            "Example Web Browser"
+        );
+        // 清单里没有 → 回退到最后一段。
+        assert_eq!(
+            app_display_name("com.example.REDACTED.notes", None, Some(&installed)),
+            "notes"
+        );
+        // 根本没有清单（`ios apps --list` 超时或失败）→ 同样回退，按钮不会空着。
+        assert_eq!(
+            app_display_name("com.example.REDACTED.notes", None, None),
+            "notes"
+        );
+        // 空白名字不算数，继续回退。
+        assert_eq!(
+            app_display_name("com.example.REDACTED.notes", Some("   "), None),
+            "notes"
+        );
+        // 记下的名字优先于清单。
+        assert_eq!(
+            app_display_name(
+                "com.example.REDACTED.browser",
+                Some("Remembered"),
+                Some(&installed)
+            ),
+            "Remembered"
+        );
+        // 没有点号时整串就是回退名。
+        assert_eq!(fallback_app_name("standalone"), "standalone");
+    }
+
+    /// 记录时清单已经在手，名字当场就填上。
+    #[test]
+    fn recent_apps_take_the_name_from_the_installed_map_when_available() {
+        let mut installed = HashMap::new();
+        installed.insert("com.example.REDACTED.notes".to_owned(), "Notes".to_owned());
+        let mut list = Vec::new();
+        remember_recent_app(&mut list, "com.example.REDACTED.notes", Some(&installed));
+        assert_eq!(list[0].name.as_deref(), Some("Notes"));
+    }
+
     /// DTO 序列化里**不能**出现 stderr 尾部或 UDID：iOS 子进程的 stderr 带着
     /// 设备标识与 bundle id（方案 §二红线）。这条测试守的是字段表本身。
     #[test]
@@ -1087,11 +1528,17 @@ mod tests {
                 width: 375,
                 height: 667,
             }),
+            recent_apps: vec![super::RecentAppDto {
+                bundle_id: "com.example.REDACTED.browser".into(),
+                name: "Example Web Browser".into(),
+            }],
         })
         .unwrap();
         assert!(!json.contains("stderr"), "{json}");
         assert!(!json.contains("udid"), "{json}");
         assert!(json.contains("\"proxy_port\":51234"), "{json}");
+        // bundle id 是应用的标识，不是这台手机的，可以进 DTO。
+        assert!(json.contains("com.example.REDACTED.browser"), "{json}");
     }
 
     #[test]
@@ -1512,6 +1959,7 @@ pub fn run() {
             session: Mutex::new(None),
             next_id: AtomicU64::new(1),
             meta: Mutex::new(IosMeta::default()),
+            device_id: Mutex::new(None),
         })
         .manage(PairingStore {
             state: Mutex::new(PairingState::Idle),
@@ -1534,9 +1982,11 @@ pub fn run() {
             stop_ios_session,
             ios_session_status,
             ios_tap,
+            ios_swipe,
             ios_send_text,
             ios_home,
             ios_wake,
+            ios_activate_app,
             ios_screenshot,
             iphone_mirroring_available,
             open_iphone_mirroring
@@ -1554,6 +2004,9 @@ pub fn run() {
         // 再真正退出。macOS 的 Cmd+Q 只发 ExitRequested、不发 CloseRequested，
         // 所以两个入口都要拦。
         tauri::RunEvent::ExitRequested { api, .. } if !SHUTDOWN_DONE.load(Ordering::SeqCst) => {
+            // 诊断日志保留：真机上曾出现「退出后子进程仍在」，要能从 stderr 看出
+            // 退出走到了哪一步。
+            eprintln!("exit requested; holding the exit until sessions are reclaimed");
             api.prevent_exit();
             begin_shutdown(app_handle.clone());
         }
@@ -1561,16 +2014,128 @@ pub fn run() {
             event: tauri::WindowEvent::CloseRequested { api, .. },
             ..
         } if !SHUTDOWN_DONE.load(Ordering::SeqCst) => {
+            eprintln!("window close requested; holding the close until sessions are reclaimed");
             api.prevent_close();
             begin_shutdown(app_handle.clone());
+        }
+        // 最终退出事件：不管前面有没有拦住，这里是最后一道网。同步收回，
+        // 因为事件循环马上就要结束，没有「之后」可以等。
+        tauri::RunEvent::Exit if !SHUTDOWN_DONE.load(Ordering::SeqCst) => {
+            if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+                // 后台清理（CloseRequested 触发）正在跑，store 已被它 drain：再 reclaim
+                // 一次会立刻空手返回、进程随即退出，后台线程死在梯子中途。有界等它。
+                eprintln!("exit event; waiting for the background shutdown to finish");
+                let deadline = Instant::now() + EXIT_WAIT_BUDGET;
+                while !SHUTDOWN_DONE.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if !SHUTDOWN_DONE.load(Ordering::SeqCst) {
+                    eprintln!("exit event; background shutdown did not finish in time");
+                }
+            } else {
+                eprintln!("exit event; reclaiming sessions synchronously");
+                let timed_out = reclaim_sessions(app_handle);
+                if timed_out > 0 {
+                    eprintln!("session shutdown timed out for {timed_out} session(s)");
+                }
+                SHUTDOWN_DONE.store(true, Ordering::SeqCst);
+                eprintln!("exit event; sessions reclaimed");
+            }
         }
         _ => {}
     });
 }
 
+/// `Exit` 事件等待后台清理的上限：会话预算 7 s 与配对预算 13 s 取大，再留余量。
+const EXIT_WAIT_BUDGET: Duration = Duration::from_secs(15);
+
 /// 清理只跑一次；完成后置位，让随后的退出事件直接放行。
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_DONE: AtomicBool = AtomicBool::new(false);
+
+/// 同步收回全部会话（Android + iOS）与配对 worker，返回超时的会话数。
+///
+/// 抽成独立函数是因为它要从两个入口调用：`begin_shutdown`（拦下退出后在后台
+/// 线程跑，避免事件循环卡死）与 `RunEvent::Exit`（最终退出事件，同步跑）。
+/// 真机（macOS）实测：AppleScript `quit` / Cmd+Q 走 NSApp 的终止流程时，Tauri
+/// **不会**发 `ExitRequested`，只挂在那里等于没挂——4 个 go-ios 子进程被留下。
+/// 退出时阻塞几秒无妨，窗口本来就在关。
+fn reclaim_sessions(worker: &tauri::AppHandle) -> usize {
+    // 先发配对取消，再去停会话——会话那几秒里配对 worker 正好在回收，
+    // 两条链路的等待因此重叠，而不是串行相加。
+    let cancelled_at = Instant::now();
+    let pairing = worker.state::<PairingStore>();
+    if let Ok(cancel) = pairing.cancel.lock() {
+        if let Some(cancel) = cancel.as_ref() {
+            cancel.cancel();
+        }
+    }
+
+    let store = worker.state::<SessionStore>();
+    let handles = match store.sessions.lock() {
+        Ok(mut sessions) => sessions
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            eprintln!("session store is poisoned during shutdown");
+            Vec::new()
+        }
+    };
+    let ios_store = worker.state::<IosSessionStore>();
+    let ios_handles = match ios_store.session.lock() {
+        // 占位与失败槽位没有子进程可收；真正在跑的只有 `Handle`。
+        Ok(mut session) => match session.take() {
+            Some(IosSlot::Handle(handle)) => vec![handle],
+            _ => Vec::new(),
+        },
+        Err(_) => {
+            eprintln!("iOS session store is poisoned during shutdown");
+            Vec::new()
+        }
+    };
+    // 两条链路**先全部下停止请求**，再共用同一个截止点依次等 done：
+    // 串行相加会是 7 + 7 秒，而两边的终止梯子本来就该并行跑完。
+    for handle in &handles {
+        let _ = handle.request_stop();
+    }
+    for handle in &ios_handles {
+        let _ = handle.request_stop();
+    }
+    // 两个预算目前都是 7 秒；取大的那个，常量哪天分叉了也不会有人被截断。
+    let deadline_at = Instant::now() + SHUTDOWN_DEADLINE.max(IOS_SHUTDOWN_DEADLINE);
+    let android_report = quadcontrol_android::shutdown_all(
+        &handles,
+        deadline_at.saturating_duration_since(Instant::now()),
+    );
+    let ios_report = quadcontrol_ios::session::shutdown_all(
+        &ios_handles,
+        deadline_at.saturating_duration_since(Instant::now()),
+    );
+    let timed_out = android_report.timed_out.len() + ios_report.timed_out.len();
+
+    // 配对用自己的预算（> 单次 adb 命令超时），不与会话预算共用。
+    while cancelled_at.elapsed() < wireless::PAIRING_SHUTDOWN_DEADLINE {
+        let active = pairing
+            .state
+            .lock()
+            .map(|state| pairing_is_active(&state))
+            .unwrap_or(false);
+        if !active {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if pairing
+        .state
+        .lock()
+        .map(|state| pairing_is_active(&state))
+        .unwrap_or(false)
+    {
+        eprintln!("pairing worker did not finish before exit");
+    }
+    timed_out
+}
 
 fn begin_shutdown(app_handle: tauri::AppHandle) {
     if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
@@ -1578,90 +2143,15 @@ fn begin_shutdown(app_handle: tauri::AppHandle) {
     }
     tauri::async_runtime::spawn(async move {
         let worker = app_handle.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            // 先发配对取消，再去停会话——会话那几秒里配对 worker 正好在回收，
-            // 两条链路的等待因此重叠，而不是串行相加。
-            let cancelled_at = Instant::now();
-            let pairing = worker.state::<PairingStore>();
-            if let Ok(cancel) = pairing.cancel.lock() {
-                if let Some(cancel) = cancel.as_ref() {
-                    cancel.cancel();
-                }
-            }
-
-            let store = worker.state::<SessionStore>();
-            let handles = match store.sessions.lock() {
-                Ok(mut sessions) => sessions
-                    .drain()
-                    .map(|(_, handle)| handle)
-                    .collect::<Vec<_>>(),
-                Err(_) => {
-                    eprintln!("session store is poisoned during shutdown");
-                    Vec::new()
-                }
-            };
-            let ios_store = worker.state::<IosSessionStore>();
-            let ios_handles = match ios_store.session.lock() {
-                // 占位与失败槽位没有子进程可收；真正在跑的只有 `Handle`。
-                Ok(mut session) => match session.take() {
-                    Some(IosSlot::Handle(handle)) => vec![handle],
-                    _ => Vec::new(),
-                },
-                Err(_) => {
-                    eprintln!("iOS session store is poisoned during shutdown");
-                    Vec::new()
-                }
-            };
-            // 两条链路**先全部下停止请求**，再共用同一个截止点依次等 done：
-            // 串行相加会是 7 + 7 秒，而两边的终止梯子本来就该并行跑完。
-            for handle in &handles {
-                let _ = handle.request_stop();
-            }
-            for handle in &ios_handles {
-                let _ = handle.request_stop();
-            }
-            // 两个预算目前都是 7 秒；取大的那个，常量哪天分叉了也不会有人被截断。
-            let deadline_at = Instant::now() + SHUTDOWN_DEADLINE.max(IOS_SHUTDOWN_DEADLINE);
-            let android_report = quadcontrol_android::shutdown_all(
-                &handles,
-                deadline_at.saturating_duration_since(Instant::now()),
-            );
-            let ios_report = quadcontrol_ios::session::shutdown_all(
-                &ios_handles,
-                deadline_at.saturating_duration_since(Instant::now()),
-            );
-            let timed_out = android_report.timed_out.len() + ios_report.timed_out.len();
-
-            // 配对用自己的预算（> 单次 adb 命令超时），不与会话预算共用。
-            while cancelled_at.elapsed() < wireless::PAIRING_SHUTDOWN_DEADLINE {
-                let active = pairing
-                    .state
-                    .lock()
-                    .map(|state| pairing_is_active(&state))
-                    .unwrap_or(false);
-                if !active {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            if pairing
-                .state
-                .lock()
-                .map(|state| pairing_is_active(&state))
-                .unwrap_or(false)
-            {
-                eprintln!("pairing worker did not finish before exit");
-            }
-            Some(timed_out)
-        })
-        .await;
+        let result = tauri::async_runtime::spawn_blocking(move || reclaim_sessions(&worker)).await;
         match result {
-            Ok(Some(timed_out)) if timed_out > 0 => {
+            Ok(timed_out) if timed_out > 0 => {
                 eprintln!("session shutdown timed out for {timed_out} session(s)")
             }
             Err(error) => eprintln!("shutdown worker failed: {error}"),
             _ => {}
         }
+        eprintln!("session shutdown finished; exiting");
         SHUTDOWN_DONE.store(true, Ordering::SeqCst);
         app_handle.exit(0);
     });

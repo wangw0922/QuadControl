@@ -31,6 +31,41 @@ are still unverified — that needs a Windows host.
 | Home | top-level `POST /wda/homescreen` works |
 | Text input | **only** `POST /session/{id}/element/{id}/value` works |
 
+## Second measurement pass (2026-09-14, go-ios 1.2.1, WDA 16.12.8, iOS 26.5)
+
+Same iPhone SE 3, driven through the `quadcontrol-ios` stack from a macOS host.
+Numbers below supersede the August ones where they differ.
+
+| Capability | Result |
+|---|---|
+| `ios tunnel start --userspace --udid=U` | info HTTP server up immediately; device tunnel `negotiated` **~1.1 s later**. Readiness = `GET /tunnels` lists the UDID, not "port is listening" |
+| Tunnel discovery | without `--tunnel-info-port`, `runwda` / `forward` / `tunnel ls` attach to the **most recently registered** agent on the host, even on another port. A second tunnel process on the host therefore hijacks a session; pass the port explicitly to every subcommand |
+| `ios runwda` → `GET /status` 200 | **1.6 s** |
+| MJPEG (`mjpegServerFramerate` 15, quality 50) | 750×1334 JPEG, ~87 KB/frame, **41 frames in 3 s ≈ 13.7 fps** |
+| MJPEG server handshake | pushes **nothing** until it receives an HTTP request line; header is `HTTP/1.0 200 OK`, `Content-Type: multipart/x-mixed-replace; boundary=--BoundaryString` (the boundary value itself carries `--`), parts use `Content-type: image/jpeg` + `Content-Length` |
+| `element/active` | **`GET`** works; `POST` returns `unknown command / Unhandled endpoint` on this WDA build (the August note used POST) |
+| setValue + read-back | `hello123` written to the Spotlight field, `attribute/value` read back identical |
+| `wda/keys` | **delivered this time** (`zz` appended in Spotlight). Contradicts August; treat it as unreliable, not as broken. The client keeps using setValue |
+| Locked screen, MJPEG | keeps streaming: 41 black frames in 3 s (~20 KB each). No frame-rate signal for lock state |
+| Locked screen, `/screenshot` | 13 KB valid PNG, all black, no error |
+| Locked screen, tap | returns success, no effect |
+| `wda/unlock` on a passcode device | blocks **~8 s**, then HTTP 500 `Timed out while waiting until the screen is unlocked`; `/wda/locked` stays true. The screen wakes to the passcode page, which is the intended "wake" behaviour |
+| `/wda/lock` | works; `/wda/locked` reports true within 1 s |
+| `POST /wda/homescreen` from the second home page | returns success and does **nothing** (WDA treats SpringBoard as "already home"). Use `POST /session/{s}/wda/pressButton {"name":"home"}` to really press Home; the top-level `/wda/pressButton` is unhandled on this build |
+| `POST /session/{s}/wda/dragfromtoforduration` | works (used for swipes) |
+| `ios apps --list --udid=U` | one line per app: `<bundleId> <name…> <version>`; names may contain spaces (one of nine lines did), every line carried a version; some names carry an invisible leading U+200E |
+| Tauri exit on macOS | AppleScript `quit` / Cmd+Q does **not** emit `RunEvent::ExitRequested`; only the final `RunEvent::Exit` fires. Cleanup hooked on `ExitRequested` alone left 4 orphaned go-ios children; hooking `Exit` (synchronous) reclaims them in ~3 s |
+| Press-to-visible latency | from sending the `pressButton home` request to the first changed MJPEG frame **0.33 s** (the request itself blocks ~0.5 s on this device, so the frame arrived before the request returned); this is the mechanism floor, not bandwidth (37 KB × 23 fps ≈ 0.85 MB/s) |
+| Tap latency, `POST /session/{s}/actions` (W3C) vs `POST /session/{s}/wda/tap` `{"x","y"}` (2026-09-15) | **1.50 s** vs **0.01 s** for one tap, same effect (verified repeatedly). The W3C path is what "feels slow"; the client now uses `wda/tap` |
+| Other call latencies (2026-09-15) | `wda/dragfromtoforduration` **0.05 s**, `wda/locked` **0.04 s**, `window/size` **0.29 s** |
+| MJPEG settings sweep (2026-09-15; frame sizes differ from the 2026-09-14 row above, likely different screen content, not verified — both sets are kept as measured) | `mjpegServerFramerate` 15 / quality 50 → **~14 fps, ~40 KB/frame**; framerate 30 / quality 30 → **~17 fps, ~37 KB/frame** (the client default); `mjpegScalingFactor` 50 gives **no frame-rate gain** — the bottleneck is device-side capture — so scaling is not used |
+| Double-press Home for the app switcher (2026-09-15) | **not reachable.** Two `pressButton {"name":"home"}` calls, 150 ms apart and back to back, neither opens the app switcher: one XCUITest button press takes ~0.5 s, which misses the double-press window, and WDA exposes no public app-switcher endpoint |
+| `GET /session/{s}/wda/apps/list` vs `activeAppInfo` (2026-09-15) | `apps/list` returns **only the foreground app**, so it cannot enumerate background apps. `activeAppInfo` answers in **0.24 s** with `{"value":{"bundleId":..,"pid":..,"name":..}}` (`name` is often empty) |
+| `POST /session/{s}/wda/apps/activate` `{"bundleId":..}` (2026-09-15) | **works** — brought Chrome to the foreground. Together with `activeAppInfo` this replaces the unreachable app switcher: record the foreground apps seen during a session, then activate one |
+| Second `POST /session` from any client | **invalidates the previous session**: every session-scoped call on the old id returns 404 `invalid session id` (`Session … was deleted while this request was still pending`). WDA keeps exactly one session; the client must recreate on 404 |
+| WKWebView `<img>` on a closed MJPEG stream | **never reconnects**; the last frame stays on screen with no event we could observe. The proxy must not drop a downstream connection |
+| `ios` cwd side effect | go-ios writes `selfIdentity.plist` (pairing identity incl. a private key) into the **current working directory** of the process that runs it; now git-ignored, and the GUI must run go-ios with a controlled cwd before packaging (P7) |
+
 ## Text input: use setValue, never wda/keys
 
 `POST /session/{id}/wda/keys` **returns success and the characters never
@@ -44,7 +79,7 @@ cause and is the default configuration for this project's users — so treat
 Getting the active element and setting its value works reliably:
 
 ```
-POST /session/{id}/element/active        -> element id
+GET  /session/{id}/element/active        -> element id   (POST is unhandled on WDA 16.12.8)
 POST /session/{id}/element/{id}/value    -> {"value":["192.0.2.7"]}
 ```
 

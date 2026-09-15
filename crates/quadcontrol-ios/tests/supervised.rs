@@ -10,14 +10,14 @@ use quadcontrol_ios::session::{
     shutdown_all, spawn_supervised, ExitReason, IosLaunchOptions, IosSessionHandle,
     IosSessionStatus, LaunchMode, IOS_SHUTDOWN_DEADLINE,
 };
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
 // 只有 Launch 模式的用例（`cfg(unix)`）用得到这些；windows 上它们会被判成未使用。
 #[cfg(unix)]
-use quadcontrol_ios::session::WdaIds;
+use quadcontrol_ios::session::{WdaIds, TUNNEL_READY_BUDGET};
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -55,8 +55,9 @@ fn helper() -> PathBuf {
 /// 且不在临时端口池里的号，再确认它确实空闲。
 ///
 /// 这个端口现在有**两重**作用：启动前的「是否被占」预检要求它空闲，而假
-/// `tunnel start` 随后会**真的绑上它**——会话正是靠「绑不上了」判定隧道就绪。
-/// 所以这里返回的号必须此刻空闲、且不会被别人抢走，两个条件缺一不可。
+/// `tunnel start` 随后会**真的绑上它**并在上面跑隧道信息服务——会话正是靠
+/// `GET /tunnels` 里出现本机 UDID 判定隧道就绪。所以这里返回的号必须此刻空闲、
+/// 且不会被别人抢走，两个条件缺一不可。
 // 只被 Launch 模式的用例用到，而那些用例是 `cfg(unix)` 的
 // （windows 上 Launch 直接返回 `windows_session_unsupported`）。
 // 不加这个 gate，交叉 clippy 会把它判成 dead_code。
@@ -160,6 +161,16 @@ impl Fixture {
             .collect()
     }
 
+    /// 每个用例结束时删掉自己的目录。
+    ///
+    /// `Fixture::new` 只清**同名**的旧目录，而目录名里带 PID，每轮 `cargo test`
+    /// 的 PID 都不一样——于是 `$TMPDIR` 下越堆越多（实测攒到上百个
+    /// `quadcontrol-ios-<pid>-tunnel-busy` 之类）。删失败一律忽略：清理不干净
+    /// 不该把一条本来通过的用例判红。
+    fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.pid_dir);
+    }
+
     /// 等所有四个子进程都写下 PID，返回它们。
     fn pids(&self, expected: usize) -> Vec<u32> {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -181,6 +192,13 @@ impl Fixture {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -213,7 +231,32 @@ fn launch_options(
             env,
         },
         tunnel_info_port: unique_tunnel_port(),
+        tunnel_ready_budget: TUNNEL_READY_BUDGET,
         status_budget: Duration::from_secs(20),
+    }
+}
+
+/// 读掉上游连接上的 HTTP 请求（请求行 + 头，直到空行）。
+///
+/// 两个理由，都是硬的：
+/// 1. **真机行为**：WDA 的 MJPEG 端口不发请求就一个字节都不推（实测 4 秒 0 字节），
+///    合成上游照做才有意义；
+/// 2. 不读就关连接会让内核回 **RST 而不是 FIN**（接收缓冲里还压着代理发来的请求），
+///    于是「上游正常 EOF」这条用例会收到 `Connection reset by peer`，被判成
+///    `proxy_failed` 而不是 `UpstreamClosed`。实测就是这样红的。
+fn drain_upstream_request(stream: &TcpStream) {
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(clone) => clone,
+        Err(_) => return,
+    });
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return,
+            Ok(_) if line.trim().is_empty() => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
     }
 }
 
@@ -225,6 +268,7 @@ fn synthetic_mjpeg_closing_after(frames: usize) -> u16 {
         for incoming in listener.incoming() {
             let Ok(mut stream) = incoming else { return };
             thread::spawn(move || {
+                drain_upstream_request(&stream);
                 let head = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=fr\r\n\r\n";
                 if stream.write_all(head.as_bytes()).is_err() {
                     return;
@@ -258,6 +302,7 @@ fn synthetic_mjpeg() -> u16 {
         for incoming in listener.incoming() {
             let Ok(mut stream) = incoming else { return };
             thread::spawn(move || {
+                drain_upstream_request(&stream);
                 let head = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=fr\r\n\r\n";
                 if stream.write_all(head.as_bytes()).is_err() {
                     return;
@@ -500,6 +545,7 @@ fn status_budget_expiry_reports_wda_unreachable() {
             env,
         },
         tunnel_info_port: unique_tunnel_port(),
+        tunnel_ready_budget: TUNNEL_READY_BUDGET,
         status_budget: Duration::from_secs(2),
     };
 
@@ -511,6 +557,94 @@ fn status_budget_expiry_reports_wda_unreachable() {
             code: "wda_unreachable"
         }
     );
+}
+
+/// runwda **绝不能**在设备隧道注册之前启动。
+///
+/// 真机（iPhone SE 3 + go-ios 1.2.1）上隧道信息服务一起来就能连，但设备隧道要
+/// 再过约 1.1 s 才注册；旧判据只等端口可连，runwda 抢跑就报
+/// `missing tunnel address and RSD port`，会话以 `wda_unreachable` 失败。
+///
+/// 判据用 PID 文件的 mtime 而不是 argv 日志里的时间戳：argv 日志的每一行都被
+/// `every_flag_we_pass_appears_in_the_real_usage_fixture` 当 argv 解析，往里加
+/// 时间戳会把那条用例弄坏。假 `tunnel` 在**绑定之后、延迟开始之前**写
+/// `tunnel.pid`，所以它的 mtime 就是隧道起动时刻 t₀。
+#[test]
+// Launch 模式在 windows 上按方案直接返回 `windows_session_unsupported`
+// （没有 Job Object 收不回进程树，P6 再做），所以这些用例只在 unix 上跑。
+#[cfg(unix)]
+fn runwda_waits_until_the_device_tunnel_registers() {
+    let fixture = Fixture::new("tunnel-delay");
+    let wda = FakeWda::start(FakeWdaConfig::healthy());
+    let mjpeg = synthetic_mjpeg();
+    // 1500 ms 延迟对 1.4 s 下限：留 100 ms 余量吸收轮询间隔，仍远大于旧判据下
+    // runwda 会立刻起来的 ~0 ms。
+    let options = launch_options(
+        &fixture,
+        wda.port,
+        mjpeg,
+        &[("QUADCONTROL_FAKE_TUNNEL_DELAY_MS", "1500".to_owned())],
+    );
+    let handle = spawn_with_port_retry(&options, 60);
+    // 延迟没有把启动卡死：会话照常到达 Running。
+    wait_for_running(&handle);
+    let pids = fixture.pids(4);
+
+    let mtime = |name: &str| {
+        std::fs::metadata(fixture.pid_dir.join(name))
+            .unwrap_or_else(|e| panic!("读不到 {name}：{e}"))
+            .modified()
+            .unwrap()
+    };
+    let gap = mtime("runwda.pid")
+        .duration_since(mtime("tunnel.pid"))
+        .expect("runwda 比 tunnel 还早写 PID");
+    assert!(
+        gap >= Duration::from_millis(1400),
+        "runwda 在隧道注册前就起来了：距隧道起动仅 {gap:?}"
+    );
+
+    handle.request_stop().unwrap();
+    wait_for_settled(&handle, IOS_SHUTDOWN_DEADLINE + Duration::from_secs(3));
+    for pid in pids {
+        assert_process_gone(pid);
+    }
+}
+
+/// 隧道永不注册 → `tunnel_failed`，而不是拖到 WDA 预算再报 `wda_unreachable`。
+///
+/// 这条真正测的是 `TunnelFailed` 的收尾路径：报错之后 tunnel 子进程也必须被收走。
+#[test]
+// Launch 模式在 windows 上按方案直接返回 `windows_session_unsupported`
+// （没有 Job Object 收不回进程树，P6 再做），所以这些用例只在 unix 上跑。
+#[cfg(unix)]
+fn a_tunnel_that_never_registers_fails_as_tunnel_failed() {
+    let fixture = Fixture::new("tunnel-never");
+    let wda = FakeWda::start(FakeWdaConfig::healthy());
+    let mjpeg = synthetic_mjpeg();
+    let mut options = launch_options(
+        &fixture,
+        wda.port,
+        mjpeg,
+        &[("QUADCONTROL_FAKE_TUNNEL_NEVER", "1".to_owned())],
+    );
+    // 2 s 而不是默认 10 s：判负不该让测试挂十秒。
+    options.tunnel_ready_budget = Duration::from_secs(2);
+
+    let handle = spawn_with_port_retry(&options, 61);
+    // 只有 tunnel 会起来——runwda 永远等不到。
+    let pids = fixture.pids(1);
+    let status = wait_for_settled(&handle, Duration::from_secs(20));
+    assert_eq!(
+        status,
+        IosSessionStatus::Failed {
+            code: "tunnel_failed"
+        }
+    );
+    // 失败路径也要把已经起来的子进程收干净。
+    for pid in pids {
+        assert_process_gone(pid);
+    }
 }
 
 /// 隧道信息端口被占 → `tunnel_port_busy`，绝不静默复用别人的隧道。
@@ -558,6 +692,19 @@ fn attach_mode_runs_without_any_child_process() {
     // 客户端可用，GUI 的 tap / home 之类命令能经它下发。
     let client = handle.client().unwrap();
     client.home().unwrap();
+
+    // 会话被别的客户端抢走之后，GUI 命令必须自愈而不是报 `wda_session_failed`。
+    // 真机（2026-09-15）上就是这么炸的：另一个客户端 `POST /session`，此后原
+    // session id 对任何 session 作用域端点都返回 404，`send_text` 在 `locked()`
+    // 这一步就失败，链路却完好。
+    wda.invalidate_session();
+    client.send_text("hello").unwrap();
+    assert_eq!(
+        wda.count_exact("POST /session"),
+        2,
+        "作废后应当重建过一次会话：{:?}",
+        wda.requests.lock().unwrap()
+    );
 
     handle.request_stop().unwrap();
     assert_eq!(
@@ -688,6 +835,7 @@ fn stopping_while_starting_exits_cleanly() {
             env,
         },
         tunnel_info_port: unique_tunnel_port(),
+        tunnel_ready_budget: TUNNEL_READY_BUDGET,
         status_budget: Duration::from_secs(30),
     };
 
@@ -844,6 +992,16 @@ fn every_flag_we_pass_appears_in_the_real_usage_fixture() {
             ["forward", ..] => "ios forward",
             other => panic!("假 ios 收到了意料之外的子命令：{other:?}"),
         };
+        // 每条子命令都**必须**显式带上隧道端口。真机实测：不带的话 go-ios 会用
+        // 自己的跨进程发现机制连到宿主上「最近的」隧道代理，于是本会话挂在别人
+        // 的隧道上，对方一退就 `lost connection to testmanagerd`。
+        // 上面那个循环只检查「出现的 flag 是否合法」，挡不住有人**删掉**它，
+        // 所以这里单独断言它在场。
+        assert!(
+            args.iter().any(|a| a.starts_with("--tunnel-info-port=")),
+            "`{subcommand}` 没有显式指定 --tunnel-info-port，会连到别人的隧道：{line}"
+        );
+
         let usage_line = usage
             .lines()
             .map(str::trim)
@@ -935,6 +1093,8 @@ fn children_die_with_a_sigkilled_parent() {
             let stderr =
                 std::fs::read_to_string(pid_dir.join("harness.stderr")).unwrap_or_default();
             let _ = child.kill();
+            // 诊断信息已经读进内存，目录可以走了：失败路径也不该往 $TMPDIR 里留垃圾。
+            let _ = std::fs::remove_dir_all(&pid_dir);
             panic!(
                 "中间父进程没能起好会话，只看到 {} 个 PID；目录 {names:?}；harness stderr:\n{stderr}",
                 pids.len()
@@ -1006,6 +1166,7 @@ fn pdeathsig_child_harness() {
             env,
         },
         tunnel_info_port: unique_tunnel_port(),
+        tunnel_ready_budget: TUNNEL_READY_BUDGET,
         status_budget: Duration::from_secs(30),
     };
     // 本 harness 是**另一个进程**：它的端口计数从头开始，会撞上父测试进程里其它

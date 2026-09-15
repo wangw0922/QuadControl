@@ -12,6 +12,7 @@
 
 use crate::Error;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 单次请求超时。
@@ -20,6 +21,11 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// `delete_session` 的超时：退出序列里它只是礼貌性调用，不能拖慢关闭预算。
 pub const DELETE_SESSION_TIMEOUT: Duration = Duration::from_secs(1);
+/// `wda/unlock` 的超时。
+///
+/// 必须远大于 [`REQUEST_TIMEOUT`]：真机实测有密码的设备上这个请求要**阻塞约 8 秒**
+/// 才返回 500。用 5 s 的默认超时会把它判成传输失败，进而误报成会话故障。
+pub const UNLOCK_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// 设备窗口尺寸，单位是**点**（不是像素）。真机 iPhone SE 3 是 375×667。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,13 +34,40 @@ pub struct WindowSize {
     pub height: u32,
 }
 
-/// WDA 客户端。克隆代价低（只有一个 URL、一个可选 session id 和 ureq 的 Agent），
+/// 前台应用信息（`GET /wda/activeAppInfo` 的 `value`）。
+///
+/// 只保留我们真正用得上的两个字段。`name` 不留：真机上它常常是空串，
+/// 应用名走 `ios apps --list`（[`crate::installed_apps`]）更可靠。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveApp {
+    pub bundle_id: String,
+    pub pid: u32,
+}
+
+/// WDA 客户端。克隆代价低（一个 URL、几个共享状态和 ureq 的 Agent），
 /// 监督线程持有一份，GUI 命令层通过 [`crate::session::IosSessionHandle::client`]
 /// 拿到克隆。
+///
+/// # 会话被作废时自愈
+///
+/// **真机实测（iPhone SE 3 + WDA 16.12.8，2026-09-15）**：另一个客户端对同一台
+/// WDA `POST /session` 之后，原来的 session id 对**任何** session 作用域端点都返回
+/// HTTP 404 `invalid session id`；WDA 同一时刻只保留一个会话，重启 WDA 也一样。
+/// 当时的表现是 `send_text` 在第一步 `locked()` 上就以 `wda_session_failed` 失败，
+/// 而链路其实完好——用户只能重开会话。
+///
+/// 所以每个 session 作用域请求撞上「404 + invalid session」时，会
+/// [`Client::create_session`] 一次并**重试该请求一次**（只一次，避免打转），重建后
+/// 重放记下的 MJPEG 设置。`session_id` 与 MJPEG 设置因此必须共享而不是各克隆一份：
+/// 监督线程和 GUI 命令层看到的必须是同一个会话。
 #[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
-    session_id: Option<String>,
+    session_id: Arc<Mutex<Option<String>>>,
+    /// 会话重建后要重放的 `(fps, quality)`；没配置过就是 None。
+    mjpeg: Arc<Mutex<Option<(u32, u32)>>>,
+    /// 把重建串行化，见 [`Client::recreate_session_unless_replaced`]。
+    recreate_lock: Arc<Mutex<()>>,
     agent: ureq::Agent,
 }
 
@@ -48,20 +81,78 @@ impl Client {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            session_id: None,
+            session_id: Arc::new(Mutex::new(None)),
+            mjpeg: Arc::new(Mutex::new(None)),
+            recreate_lock: Arc::new(Mutex::new(())),
             agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
         }
     }
 
     /// 当前 session id；[`Client::create_session`] 之前是 None。
-    pub fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
+    ///
+    /// 返回拥有所有权的 `String`：会话可能被后台重建，借出去的引用会立刻过期。
+    pub fn session_id(&self) -> Option<String> {
+        self.session_id
+            .lock()
+            .expect("session mutex poisoned")
+            .clone()
     }
 
-    fn session(&self) -> Result<&str, Error> {
-        self.session_id
-            .as_deref()
+    fn session(&self) -> Result<String, Error> {
+        self.session_id()
             .ok_or_else(|| Error::WdaSessionFailed("no WDA session has been created".into()))
+    }
+
+    /// 发一个 session 作用域请求；撞上「会话已被作废」就重建会话并**重试一次**。
+    ///
+    /// `call` 拿到的是当次要用的 session id，返回未包装的失败文案（判据要看原文）。
+    /// 只重试一次：重建后还是 404 说明不是作废问题，再试下去只会打转。
+    fn session_call<T>(
+        &self,
+        call: impl Fn(&str) -> Result<T, String>,
+        wrap: impl Fn(String) -> Error,
+    ) -> Result<T, Error> {
+        let session = self.session()?;
+        match call(&session) {
+            Ok(value) => Ok(value),
+            Err(message) if is_invalid_session(&message) => {
+                self.recreate_session_unless_replaced(&session)?;
+                call(&self.session()?).map_err(wrap)
+            }
+            Err(message) => Err(wrap(message)),
+        }
+    }
+
+    /// 串行化的重建：只有当会话**仍是**那个作废的 `stale` 时才真的重建。
+    ///
+    /// WDA 重启时所有在飞的 session 调用会**同时**吃 404——1 秒一次的状态轮询
+    /// （`window_size` + `locked`）和用户命令分别持有 `Client` 的克隆。不串行化的话
+    /// 两边都会 `POST /session`，而 WDA 只留最后一个，先建的那条紧接着又 404；
+    /// 因为只重试一次，它会以 `wda_session_failed` 收场——正是本机制要消灭的错误。
+    ///
+    /// 锁只跨「建会话 + 重放设置」两次 HTTP 调用，各自受 [`REQUEST_TIMEOUT`] 约束，
+    /// 等待有界。
+    fn recreate_session_unless_replaced(&self, stale: &str) -> Result<(), Error> {
+        let _serial = self.recreate_lock.lock().expect("recreate mutex poisoned");
+        if self.session()? != stale {
+            // 别的克隆已经重建过了，直接拿新 id 去重试。
+            return Ok(());
+        }
+        self.recreate_session()
+    }
+
+    /// 重建会话，并把记下的 MJPEG 设置重放上去。
+    ///
+    /// 重放用的是**不重试**的底层调用：重建路径上再触发一次重建就是递归。
+    fn recreate_session(&self) -> Result<(), Error> {
+        self.create_session()?;
+        let settings = *self.mjpeg.lock().expect("mjpeg mutex poisoned");
+        if let Some((fps, quality)) = settings {
+            let session = self.session()?;
+            self.configure_mjpeg_once(&session, fps, quality)
+                .map_err(Error::WdaSessionFailed)?;
+        }
+        Ok(())
     }
 
     /// `GET /status`：就绪探测。起 WDA 后由调用方轮询。
@@ -70,7 +161,9 @@ impl Client {
     }
 
     /// `POST /session`：建会话并记下 session id。
-    pub fn create_session(&mut self) -> Result<String, Error> {
+    ///
+    /// 取 `&self`：session id 是共享状态，重建路径要能在克隆出去的客户端上调用。
+    pub fn create_session(&self) -> Result<String, Error> {
         let body = serde_json::json!({ "capabilities": { "alwaysMatch": {} } });
         let value = self.post("/session", &body, Error::WdaSessionFailed)?;
         // WDA 把 sessionId 放在顶层或 value 里，两种形状都见过。
@@ -80,7 +173,7 @@ impl Client {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| Error::WdaSessionFailed("WDA response has no sessionId".into()))?
             .to_owned();
-        self.session_id = Some(id.clone());
+        *self.session_id.lock().expect("session mutex poisoned") = Some(id.clone());
         Ok(id)
     }
 
@@ -88,22 +181,35 @@ impl Client {
     ///
     /// **这只作用在编码器侧**，与设备刷新率毫无关系——红线明令绝不修改设备
     /// 显示刷新率，本库没有也不会有任何刷新率参数。
+    ///
+    /// 参数会被记下来：会话若被作废并重建，这些设置要重放，否则新会话的 MJPEG
+    /// 会退回 WDA 的默认帧率与画质。
     pub fn configure_mjpeg(&self, fps: u32, quality: u32) -> Result<(), Error> {
-        let path = format!("/session/{}/appium/settings", self.session()?);
+        *self.mjpeg.lock().expect("mjpeg mutex poisoned") = Some((fps, quality));
+        self.session_call(
+            |session| self.configure_mjpeg_once(session, fps, quality),
+            Error::WdaSessionFailed,
+        )
+    }
+
+    /// 单次 `appium/settings` 调用，不带重试；[`Client::recreate_session`] 也用它。
+    fn configure_mjpeg_once(&self, session: &str, fps: u32, quality: u32) -> Result<(), String> {
+        let path = format!("/session/{session}/appium/settings");
         let body = serde_json::json!({
             "settings": {
                 "mjpegServerFramerate": fps,
                 "mjpegServerScreenshotQuality": quality,
             }
         });
-        self.post(&path, &body, Error::WdaSessionFailed)?;
-        Ok(())
+        self.post_raw(&path, &body).map(|_| ())
     }
 
     /// `GET /session/{s}/window/size`：旋转会改变它，调用方按状态轮询刷新。
     pub fn window_size(&self) -> Result<WindowSize, Error> {
-        let path = format!("/session/{}/window/size", self.session()?);
-        let value = self.get(&path, Error::WdaSessionFailed)?;
+        let value = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/window/size")),
+            Error::WdaSessionFailed,
+        )?;
         let size = value.get("value").unwrap_or(&value);
         let field = |name: &str| {
             size.get(name)
@@ -116,37 +222,82 @@ impl Client {
         })
     }
 
-    /// `POST /session/{s}/actions`：W3C pointer 点按，坐标单位是**点**。
+    /// `POST /session/{s}/wda/tap` `{"x":..,"y":..}`：点按，坐标单位是**点**。
+    ///
+    /// **不是 `POST /session/{s}/actions`。** 真机实测（iPhone SE 3 + WDA 16.12.8，
+    /// 2026-09-15）：同一次点按，W3C `actions` 要 **1.50 s**，XCUITest 扩展的
+    /// `wda/tap` 只要 **0.01 s**，效果相同（多次验证生效）。用户反馈的「反应慢」
+    /// 就是 `actions` 这条路径，所以点按一律走 `wda/tap`。
+    ///
+    /// 路径是**会话作用域**的，走 `session_call`，会话被作废时自愈。
     ///
     /// 锁定时不转发：锁屏下点按不会产生效果，却不会报错（静默失败之一）。
     pub fn tap(&self, x_pt: f64, y_pt: f64) -> Result<(), Error> {
         if self.locked()? {
             return Err(Error::DeviceLocked);
         }
-        let path = format!("/session/{}/actions", self.session()?);
-        let body = serde_json::json!({
-            "actions": [{
-                "type": "pointer",
-                "id": "finger1",
-                "parameters": { "pointerType": "touch" },
-                "actions": [
-                    { "type": "pointerMove", "duration": 0, "x": x_pt, "y": y_pt },
-                    { "type": "pointerDown", "button": 0 },
-                    { "type": "pause", "duration": 50 },
-                    { "type": "pointerUp", "button": 0 },
-                ],
-            }],
-        });
-        self.post(&path, &body, Error::WdaSessionFailed)?;
-        Ok(())
+        let body = serde_json::json!({ "x": x_pt, "y": y_pt });
+        self.session_call(
+            |session| self.post_raw(&format!("/session/{session}/wda/tap"), &body),
+            Error::WdaSessionFailed,
+        )
+        .map(|_| ())
     }
 
-    /// `POST /wda/homescreen`：回主屏。这是**顶层**端点，不带 session 段。
+    /// `POST /session/{s}/wda/dragfromtoforduration`：滑动，坐标单位是**点**。
+    ///
+    /// 与 [`Client::tap`] 一致：锁定时不转发（锁屏下滑动不产生效果也不报错）。
+    /// `duration_secs` 钳制在 [`SWIPE_MIN_SECS`]–[`SWIPE_MAX_SECS`]：太短 WDA 会
+    /// 判成点按，太长会顶满 [`REQUEST_TIMEOUT`]。非有限值（NaN/inf）当作最小值——
+    /// `f64::clamp` 会把 NaN 原样传下去。
+    ///
+    /// 端点依据真机验证（iPhone SE 3 + WDA 16.12.8，2026-08）：这条 XCUITest
+    /// 扩展端点可用。
+    pub fn swipe(&self, from: (f64, f64), to: (f64, f64), duration_secs: f64) -> Result<(), Error> {
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
+        let duration = if duration_secs.is_finite() {
+            duration_secs.clamp(SWIPE_MIN_SECS, SWIPE_MAX_SECS)
+        } else {
+            SWIPE_MIN_SECS
+        };
+        let body = serde_json::json!({
+            "fromX": from.0,
+            "fromY": from.1,
+            "toX": to.0,
+            "toY": to.1,
+            "duration": duration,
+        });
+        self.session_call(
+            |session| {
+                self.post_raw(
+                    &format!("/session/{session}/wda/dragfromtoforduration"),
+                    &body,
+                )
+            },
+            Error::WdaSessionFailed,
+        )
+        .map(|_| ())
+    }
+
+    /// `POST /session/{s}/wda/pressButton` `{"name":"home"}`：按 Home 键回主屏。
+    ///
+    /// **不是 `/wda/homescreen`。** 真机实测（iPhone SE 3 + WDA 16.12.8，
+    /// 2026-09-15）：前台已经是 SpringBoard 时——哪怕停在第二屏——`/wda/homescreen`
+    /// 直接返回成功而**不按键**，于是「回到主屏幕」回不到第一页。改用按 Home 键：
+    /// 该端点返回 200 已验证，**回到第一页的效果由本轮真机验收确认**。
+    ///
+    /// 路径是**会话作用域**的：同一台真机上顶层 `POST /wda/pressButton` 返回
+    /// `unknown command / Unhandled endpoint`，只有 `/session/{s}/wda/pressButton`
+    /// 被处理。因此走 `session_call`，会话被作废时自愈。
     pub fn home(&self) -> Result<(), Error> {
-        self.post("/wda/homescreen", &serde_json::json!({}), |e| {
-            Error::WdaSessionFailed(e)
-        })?;
-        Ok(())
+        let body = serde_json::json!({ "name": "home" });
+        self.session_call(
+            |session| self.post_raw(&format!("/session/{session}/wda/pressButton"), &body),
+            Error::WdaSessionFailed,
+        )
+        .map(|_| ())
     }
 
     /// `GET /session/{s}/wda/locked`：锁定状态。
@@ -154,8 +305,10 @@ impl Client {
     /// 这是**唯一**的锁定判据。停帧、黑屏都不是锁屏信号：真机测过，锁屏后截图
     /// 返回的是合法的全黑 PNG，没有任何错误。
     pub fn locked(&self) -> Result<bool, Error> {
-        let path = format!("/session/{}/wda/locked", self.session()?);
-        let value = self.get(&path, Error::WdaSessionFailed)?;
+        let value = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/wda/locked")),
+            Error::WdaSessionFailed,
+        )?;
         value
             .get("value")
             .and_then(serde_json::Value::as_bool)
@@ -172,13 +325,43 @@ impl Client {
     /// 所以做**有界**轮询（[`UNLOCK_SETTLE_BUDGET`]）；预算内仍锁定就报
     /// [`Error::DeviceLocked`]——那通常意味着设备有密码，需要用户介入。
     ///
-    /// 注意：本操作在真机上**未测量**（README 如实标注），真机验收时要补测并回写。
+    /// # 真机实测（iPhone SE 3 + WDA 16.12.8，有密码）
+    ///
+    /// `POST /wda/unlock` 会**阻塞约 8 秒**然后返回 HTTP 500：
+    /// `Error Domain=com.facebook.WebDriverAgent Code=1 "Timed out while waiting
+    /// until the screen is unlocked"`；此后 `/wda/locked` 仍为 true——屏幕已经点亮、
+    /// 停在密码页，这**正是**我们要的「唤醒屏幕」效果。
+    ///
+    /// 两条由此而来的设计：
+    /// 1. 这个请求单独用 [`UNLOCK_TIMEOUT`] 的 agent。用默认的 5 s
+    ///    [`REQUEST_TIMEOUT`] 会先以 ureq 超时失败，被映射成 `wda_session_failed`，
+    ///    界面显示成「无法建立会话」——对一台只是设了密码的手机来说是彻头彻尾的误报。
+    /// 2. 请求失败（HTTP 500 或超时）**不立即报错**，而是回头查一次
+    ///    [`Client::locked`]：仍锁定 → [`Error::DeviceLocked`]（预期结果，等用户
+    ///    自己解锁）；已解锁 → `Ok`。只有 `locked()` 本身也失败，才是真的
+    ///    [`Error::WdaSessionFailed`]。
     pub fn wake(&self) -> Result<(), Error> {
         if !self.locked()? {
             return Ok(());
         }
         let path = format!("/session/{}/wda/unlock", self.session()?);
-        self.post(&path, &serde_json::json!({}), Error::WdaSessionFailed)?;
+        // 单独的 agent：unlock 在有密码的设备上要阻塞约 8 s 才返回 500。
+        let agent = ureq::AgentBuilder::new().timeout(UNLOCK_TIMEOUT).build();
+        let unlock = agent
+            .post(&format!("{}{path}", self.base_url))
+            .send_json(serde_json::json!({}));
+        // unlock 不走 `session_call`：它本来就把「失败」交给 `locked()` 裁决，而
+        // `locked()` 自己会在会话被作废时重建并重试，重建后下面那一轮轮询就落在
+        // 新会话上。会话作废的情形里屏幕根本没被碰过，重发一次 unlock 没有意义。
+        if unlock.is_err() {
+            // 失败不代表没效果：屏幕通常已经亮了，只是停在密码页。让 `locked()`
+            // 来裁决，而不是把一个预期内的 500 报成会话故障。
+            return if self.locked()? {
+                Err(Error::DeviceLocked)
+            } else {
+                Ok(())
+            };
+        }
 
         let deadline = std::time::Instant::now() + UNLOCK_SETTLE_BUDGET;
         loop {
@@ -190,6 +373,64 @@ impl Client {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// `GET /session/{s}/wda/activeAppInfo`：当前**前台**应用。
+    ///
+    /// 这是「最近使用的应用」卡的唯一数据来源。真机实测（iPhone SE 3 +
+    /// WDA 16.12.8，2026-09-15）：**0.24 s** 返回
+    /// `{"value":{"bundleId":..,"pid":..,"name":..}}`。
+    ///
+    /// **为什么不用 `GET /session/{s}/wda/apps/list`**：同一台真机上它只返回
+    /// **前台**那一个应用，列不出后台应用，凑不出「最近使用」。而 iOS 的多任务
+    /// 卡片界面本身从电脑这侧不可达（Home 键机型要双击，一次 XCUITest 按键约
+    /// 0.5 s，凑不出双击窗口；WDA 也没有公开的切换器端点），所以由 GUI 记录
+    /// 本次会话里见过的前台应用，用 [`Client::activate_app`] 切回去。
+    ///
+    /// 锁定时**不**拦截：这只是一次读取，没有会静默失败的写操作。
+    pub fn active_app(&self) -> Result<ActiveApp, Error> {
+        let value = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/wda/activeAppInfo")),
+            Error::WdaSessionFailed,
+        )?;
+        let info = value.get("value").unwrap_or(&value);
+        let bundle_id = info
+            .get("bundleId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::WdaSessionFailed("activeAppInfo has no bundleId".into()))?
+            .to_owned();
+        // pid 缺失不值得失败掉整次查询：卡片只认 bundle id。
+        let pid = info
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        Ok(ActiveApp { bundle_id, pid })
+    }
+
+    /// `POST /session/{s}/wda/apps/activate` `{"bundleId":..}`：把应用切到前台。
+    ///
+    /// 真机验证（iPhone SE 3 + WDA 16.12.8，2026-09-15）：有效，把 Chrome 切到了
+    /// 前台。这是「最近使用的应用」卡的写操作。
+    ///
+    /// 与 [`Client::tap`] 一致：**锁定时不转发**。锁屏下启动应用不会产生效果，
+    /// 而我们不想把一个静默失败报成成功。
+    ///
+    /// 非锁定的失败单独给 [`Error::ActivateAppFailed`]：应用被卸载、bundle id
+    /// 写错都会落在这里，用户看到的是「无法切换到该应用」而不是「会话故障」。
+    pub fn activate_app(&self, bundle_id: &str) -> Result<(), Error> {
+        if bundle_id.is_empty() {
+            return Err(Error::ActivateAppFailed("empty bundle id".into()));
+        }
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
+        let body = serde_json::json!({ "bundleId": bundle_id });
+        self.session_call(
+            |session| self.post_raw(&format!("/session/{session}/wda/apps/activate"), &body),
+            Error::ActivateAppFailed,
+        )
+        .map(|_| ())
     }
 
     /// `GET /screenshot`：返回解码后的 PNG 字节。
@@ -208,9 +449,18 @@ impl Client {
 
     /// 向当前聚焦元素送文字，并**回读核验**。
     ///
-    /// 流程：`POST element/active` 取元素 → `POST element/{e}/value` 写入 →
+    /// 流程：`GET element/active` 取元素 → `POST element/{e}/value` 写入 →
     /// `GET element/{e}/attribute/value` 回读。回读不含发送内容就报
     /// [`Error::TextUnconfirmed`]，文案由 GUI 给（「无法确认已送达，请在手机上核对」）。
+    ///
+    /// **取元素必须用 GET。** 真机实测（WDA 16.12.8）：`POST
+    /// /session/{s}/element/active` 返回
+    /// `{"value":{"error":"unknown command","message":"Unhandled endpoint ..."}}`；
+    /// 只有 `GET` 被处理（无聚焦元素时返回 `nosuchelement` 错误）。
+    /// `agents/ios-wda/README.md` 里写的 POST 是旧版本 WDA 的行为。
+    ///
+    /// `nosuchelement` 映射成 [`Error::NoActiveElement`]，而不是笼统的会话故障：
+    /// 「手机上没有聚焦的输入框」是用户能自己修的状态，值得一句明确的提示。
     ///
     /// **绝不调用 `POST /wda/keys`。** 真机验证两次（无聚焦元素、以及光标可见键盘
     /// 弹起的正常聚焦状态）：它**返回成功而字符从不送达**。设备当时启用了简体中文
@@ -230,15 +480,23 @@ impl Client {
         if self.locked()? {
             return Err(Error::DeviceLocked);
         }
-        let session = self.session()?;
-        let active = self.post(
-            &format!("/session/{session}/element/active"),
-            &serde_json::json!({}),
-            Error::WdaSessionFailed,
+        // GET，不是 POST：见本函数的文档。WDA 对无聚焦元素回 `nosuchelement`，
+        // 那不是故障，是「请先点进一个输入框」。
+        let active = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/element/active")),
+            |message| {
+                if message.contains("nosuchelement") {
+                    Error::NoActiveElement
+                } else {
+                    Error::WdaSessionFailed(message)
+                }
+            },
         )?;
-        let element = element_id(&active)
-            .ok_or_else(|| Error::WdaSessionFailed("no active element on the device".into()))?;
-
+        let element = element_id(&active).ok_or(Error::NoActiveElement)?;
+        // 元素 id 属于取到它的那个会话，所以写入与回读**不再重建会话**：真在这中间
+        // 被作废了，重建后这个 id 已经没有意义，硬重试只会对着新会话的陌生元素写。
+        // 那种情况如实报 `wda_session_failed`，用户重发一次就落在新会话上。
+        let session = self.session()?;
         self.post(
             &format!("/session/{session}/element/{element}/value"),
             &serde_json::json!({ "value": [text] }),
@@ -276,12 +534,7 @@ impl Client {
     }
 
     fn get(&self, path: &str, wrap: impl Fn(String) -> Error) -> Result<serde_json::Value, Error> {
-        let response = self
-            .agent
-            .get(&format!("{}{path}", self.base_url))
-            .call()
-            .map_err(|e| wrap(describe(path, e)))?;
-        read_json(response, path, &wrap)
+        self.get_raw(path).map_err(wrap)
     }
 
     fn post(
@@ -290,17 +543,48 @@ impl Client {
         body: &serde_json::Value,
         wrap: impl Fn(String) -> Error,
     ) -> Result<serde_json::Value, Error> {
+        self.post_raw(path, body).map_err(wrap)
+    }
+
+    /// 未包装的 GET：失败文案原样返回，好让 [`is_invalid_session`] 看原文判断。
+    fn get_raw(&self, path: &str) -> Result<serde_json::Value, String> {
+        let response = self
+            .agent
+            .get(&format!("{}{path}", self.base_url))
+            .call()
+            .map_err(|e| describe(path, e))?;
+        read_json_raw(response, path)
+    }
+
+    /// 未包装的 POST；见 [`Client::get_raw`]。
+    fn post_raw(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         let response = self
             .agent
             .post(&format!("{}{path}", self.base_url))
             .send_json(body.clone())
-            .map_err(|e| wrap(describe(path, e)))?;
-        read_json(response, path, &wrap)
+            .map_err(|e| describe(path, e))?;
+        read_json_raw(response, path)
     }
+}
+
+/// 这条失败文案是不是「会话已被作废」。
+///
+/// 真机上的形状是 HTTP 404 + 响应体里的 `invalid session id`；WDA 各版本也写过
+/// `Session does not exist`，两种都认。必须同时看 404：别的端点的响应体里出现
+/// 同样的字样时不该触发重建。
+fn is_invalid_session(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("returned 404")
+        && (lower.contains("invalid session") || lower.contains("session does not exist"))
 }
 
 /// 解锁动画的有界等待预算；见 [`Client::wake`]。
 pub const UNLOCK_SETTLE_BUDGET: Duration = Duration::from_secs(2);
+
+/// [`Client::swipe`] 的最短时长（秒）。再短 WDA 会把它判成点按。
+pub const SWIPE_MIN_SECS: f64 = 0.05;
+/// [`Client::swipe`] 的最长时长（秒）。留足余量不顶满 [`REQUEST_TIMEOUT`]。
+pub const SWIPE_MAX_SECS: f64 = 2.0;
 
 /// 从 `element/active` 的响应里取元素 id。
 ///
@@ -339,27 +623,22 @@ fn describe(path: &str, error: ureq::Error) -> String {
 ///
 /// 多读一个字节来判断是否**超**限：`take(n)` 读满 n 字节时无法区分「正好 n」和
 /// 「被截断」，而截断后的 JSON 解析失败会报成一个误导性的语法错误。
-fn read_json(
-    response: ureq::Response,
-    path: &str,
-    wrap: &impl Fn(String) -> Error,
-) -> Result<serde_json::Value, Error> {
+fn read_json_raw(response: ureq::Response, path: &str) -> Result<serde_json::Value, String> {
     let mut body = Vec::new();
     response
         .into_reader()
         .take(BODY_LIMIT as u64 + 1)
         .read_to_end(&mut body)
-        .map_err(|e| wrap(format!("WDA {path} body could not be read: {e}")))?;
+        .map_err(|e| format!("WDA {path} body could not be read: {e}"))?;
     if body.len() > BODY_LIMIT {
-        return Err(wrap(format!(
+        return Err(format!(
             "WDA {path} response exceeded the {BODY_LIMIT} byte limit"
-        )));
+        ));
     }
     if body.is_empty() {
         return Ok(serde_json::Value::Null);
     }
-    serde_json::from_slice(&body)
-        .map_err(|e| wrap(format!("WDA {path} returned unparsable JSON: {e}")))
+    serde_json::from_slice(&body).map_err(|e| format!("WDA {path} returned unparsable JSON: {e}"))
 }
 
 /// 标准 base64 解码（RFC 4648，带 `=` 填充）。
@@ -467,6 +746,26 @@ mod tests {
         assert_eq!(
             client.window_size().unwrap_err().code(),
             "wda_session_failed"
+        );
+        // `home` 从顶层 `/wda/homescreen` 换成会话作用域的 `pressButton` 之后，
+        // 同样要求先有会话。
+        assert_eq!(client.home().unwrap_err().code(), "wda_session_failed");
+        // 「最近使用的应用」两个端点同样是会话作用域的。
+        assert_eq!(
+            client.active_app().unwrap_err().code(),
+            "wda_session_failed"
+        );
+        assert_eq!(
+            client
+                .activate_app("com.example.REDACTED")
+                .unwrap_err()
+                .code(),
+            "wda_session_failed"
+        );
+        // 空 bundle id 在碰网络之前就被挡住。
+        assert_eq!(
+            client.activate_app("").unwrap_err().code(),
+            "activate_app_failed"
         );
         assert!(client.session_id().is_none());
     }
