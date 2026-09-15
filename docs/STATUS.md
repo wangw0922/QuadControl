@@ -3,7 +3,7 @@
 The end-to-end roadmap from the current state to the finished product — system
 boundaries and per-step acceptance criteria — is [MASTER_PLAN.md](MASTER_PLAN.md).
 
-Updated 2026-09-14. Control directions are fixed — see
+Updated 2026-09-15. Control directions are fixed — see
 [control architecture](CONTROL_ARCHITECTURE.md): every desktop
 (Windows/macOS/Linux)→Android rides **scrcpy** as the engine;
 Windows/Linux→iPhone goes through go-ios and WebDriverAgent; macOS→iPhone uses
@@ -73,12 +73,24 @@ Apple's iPhone Mirroring rather than anything of ours.
   termination ladder measured under 7 s with all four children ignoring
   SIGINT and SIGTERM, Linux `PR_SET_PDEATHSIG`), and screen C in the GUI
   (macOS renders only the iPhone Mirroring guidance card; Windows refuses
-  sessions until P6). **Not verified on hardware**: no go-ios or validly
-  signed WDA on the development host. Uncalibrated against a real device:
-  runwda/usbmuxd stderr keyword tables, `/wda/unlock`, the WDA MJPEG
-  upstream framing, the default WDA bundle ids. The acceptance steps are in
-  [IOS_PANEL_PLAN.md](IOS_PANEL_PLAN.md) §四 and need an iPhone SE 3 plus a
-  freshly signed WDA.
+  sessions until P6). **Verified on hardware on 2026-09-14/15** (iPhone SE 3,
+  iOS 26.5, WDA 16.12.8, go-ios 1.2.1, macOS host on the debug path): start,
+  live MJPEG at ~12 fps in the GUI, tap, text, screenshot, home, lock state,
+  wake, session self-heal, and clean disconnect. The first hardware pass
+  exposed seven defects (tunnel readiness gate, missing `--tunnel-info-port`
+  on child commands, proxy never sending the HTTP request, `element/active`
+  method, unlock timeout mapping, the "newest downstream wins" proxy rule
+  that froze WKWebView, WDA session invalidation) — all fixed in P4.3 and
+  recorded in [agents/ios-wda/README.md](../agents/ios-wda/README.md).
+  P4.3 also adds a **recent-apps card**: iOS's app switcher cannot be opened
+  from the computer and `wda/apps/list` returns only the foreground app, so
+  the GUI records the foreground apps seen during a session
+  (`wda/activeAppInfo`) and switches back to one with `wda/apps/activate`;
+  app names come from a one-shot `ios apps --list`. **Not yet verified on
+  hardware.**
+  Still unverified: Linux host (usbmuxd, PDEATHSIG on real go-ios), Windows
+  entirely, and a passcode-locked wake through the GUI (verified only via a
+  direct WDA call).
 - Still missing on the desktop side: Windows/Linux real-device engine
   verification (P6) and packaging (P7). See [MASTER_PLAN.md](MASTER_PLAN.md).
 

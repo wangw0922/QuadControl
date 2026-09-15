@@ -155,7 +155,8 @@
           <section id="ios-panel" class="platform-panel" hidden>
             <div id="ios-stage-column" class="ios-stage-column">
               <div id="ios-stage" class="ios-stage">
-                <img id="ios-stream" class="ios-stream" alt="" />
+                <!-- draggable=false：`<img>` 默认可拖，原生拖放会打断滑动手势（pointercancel）。 -->
+                <img id="ios-stream" class="ios-stream" alt="" draggable="false" />
                 <div id="ios-stage-placeholder" class="ios-stage-placeholder">
                   <svg class="icon mirror-phone" aria-hidden="true"><use href="#icon-smartphone"></use></svg>
                   <span data-i18n="iosStageHint"></span>
@@ -203,6 +204,15 @@
                   <span data-i18n="iosHome"></span>
                 </button>
                 <p id="ios-action-result" class="ios-note" aria-live="polite" hidden></p>
+              </section>
+
+              <!-- iOS 的多任务卡片界面从电脑这侧不可达，这是它的等价物：本次会话
+                   里见过的前台应用，一键切回去。按钮由 JS 按列表重建。 -->
+              <section id="ios-recent-card" class="card elev-sm ios-recent-card">
+                <h2 data-i18n="iosRecentTitle"></h2>
+                <p class="ios-note" data-i18n="iosRecentDescription"></p>
+                <div id="ios-recent-list" class="ios-recent-list"></div>
+                <p id="ios-recent-empty" class="ios-note" data-i18n="iosRecentEmpty" hidden></p>
               </section>
 
               <section class="card ios-note-card">

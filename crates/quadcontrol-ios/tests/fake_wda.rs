@@ -37,6 +37,8 @@ pub struct FakeWdaConfig {
     /// 原 session id 对任何 session 作用域端点都返回 404；WDA 同一时刻只留一个
     /// 会话，重启 WDA 同理。
     pub invalidate_after_first_call: bool,
+    /// `POST /wda/apps/activate` 是否回 500（应用不存在之类的非锁定失败）。
+    pub activate_fails: bool,
     /// 窗口尺寸。
     pub window: (u32, u32),
 }
@@ -51,6 +53,7 @@ impl FakeWdaConfig {
             read_back_override: None,
             session_fails: false,
             invalidate_after_first_call: false,
+            activate_fails: false,
             window: (375, 667),
         }
     }
@@ -62,7 +65,12 @@ pub struct FakeWda {
     last_text: Arc<Mutex<String>>,
     /// 当前**唯一**有效的 session id；别的 id 一律 404。None = 还没建会话。
     current_session: Arc<Mutex<Option<String>>>,
+    /// 当前前台应用的 bundle id；`apps/activate` 改它，`activeAppInfo` 读它。
+    active_bundle: Arc<Mutex<String>>,
     pub requests: Arc<Mutex<Vec<String>>>,
+    /// 每个请求的 `(路径, 请求体)`；体里的内容也是契约的一部分
+    /// （`pressButton` 的 `{"name":"home"}`）。
+    bodies: Arc<Mutex<Vec<(String, String)>>>,
     pub delete_session_calls: Arc<AtomicU64>,
 }
 
@@ -73,17 +81,22 @@ impl FakeWda {
         let locked = Arc::new(AtomicBool::new(config.locked));
         let last_text = Arc::new(Mutex::new(String::new()));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
         let delete_session_calls = Arc::new(AtomicU64::new(0));
         let current_session = Arc::new(Mutex::new(None));
+        // 真机上 activeAppInfo 在主屏时回的就是 SpringBoard。
+        let active_bundle = Arc::new(Mutex::new(SPRINGBOARD_BUNDLE_ID.to_owned()));
 
         let state = State {
             config,
             locked: Arc::clone(&locked),
             last_text: Arc::clone(&last_text),
             current_session: Arc::clone(&current_session),
+            active_bundle: Arc::clone(&active_bundle),
             sessions_created: Arc::new(AtomicU64::new(0)),
             invalidated_once: Arc::new(AtomicBool::new(false)),
             requests: Arc::clone(&requests),
+            bodies: Arc::clone(&bodies),
             delete_session_calls: Arc::clone(&delete_session_calls),
         };
         thread::spawn(move || {
@@ -99,9 +112,16 @@ impl FakeWda {
             locked,
             last_text,
             current_session,
+            active_bundle,
             requests,
+            bodies,
             delete_session_calls,
         }
+    }
+
+    /// 当前前台应用的 bundle id。
+    pub fn active_bundle(&self) -> String {
+        self.active_bundle.lock().unwrap().clone()
     }
 
     /// 手动作废当前会话，模拟「另一个客户端抢走了 WDA 的唯一会话」。
@@ -145,6 +165,16 @@ impl FakeWda {
             .iter()
             .any(|line| line.contains(needle))
     }
+
+    /// 有没有一个请求，路径含 `path_needle` **且**请求体含 `body_needle`。
+    /// 子串匹配就够，不解析 JSON。
+    pub fn saw_body(&self, path_needle: &str, body_needle: &str) -> bool {
+        self.bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, body)| path.contains(path_needle) && body.contains(body_needle))
+    }
 }
 
 #[derive(Clone)]
@@ -153,9 +183,11 @@ struct State {
     locked: Arc<AtomicBool>,
     last_text: Arc<Mutex<String>>,
     current_session: Arc<Mutex<Option<String>>>,
+    active_bundle: Arc<Mutex<String>>,
     sessions_created: Arc<AtomicU64>,
     invalidated_once: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<(String, String)>>>,
     delete_session_calls: Arc<AtomicU64>,
 }
 
@@ -196,6 +228,11 @@ fn handle(mut stream: TcpStream, state: &State) {
         .lock()
         .unwrap()
         .push(format!("{method} {path}"));
+    state
+        .bodies
+        .lock()
+        .unwrap()
+        .push((path.to_owned(), body.clone()));
 
     // 红线自查：本库绝不应该调用 /wda/keys（真机上它返回成功但不送达）。
     assert!(
@@ -285,7 +322,68 @@ fn route(state: &State, method: &str, path: &str, body: &str) -> (u16, String) {
         }
         return (200, r#"{"value":null}"#.to_owned());
     }
-    if path == "/wda/homescreen" || path.ends_with("/actions") {
+    if path.ends_with("/wda/activeAppInfo") {
+        let bundle = state.active_bundle.lock().unwrap().clone();
+        // 真机的形状；`name` 常常是空串，客户端不该依赖它。
+        return (
+            200,
+            format!(r#"{{"value":{{"bundleId":"{bundle}","pid":1234,"name":""}}}}"#),
+        );
+    }
+    if path.ends_with("/wda/apps/activate") {
+        if state.config.activate_fails {
+            return (
+                500,
+                r#"{"value":{"error":"unknown error","message":"Cannot launch the application"}}"#
+                    .to_owned(),
+            );
+        }
+        // 与 `/value` 路由同样的粗切法：不为替身引入 JSON 依赖。
+        // **只认单键请求体**（客户端只发 `{"bundleId":..}`）；多加一个键就切错了。
+        if let Some(bundle) = body
+            .split_once(r#""bundleId":"#)
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(inner, _)| inner.trim().trim_matches('"').to_owned())
+        {
+            *state.active_bundle.lock().unwrap() = bundle;
+        }
+        return (200, r#"{"value":null}"#.to_owned());
+    }
+    if path.ends_with("/wda/dragfromtoforduration") {
+        return (200, r#"{"value":null}"#.to_owned());
+    }
+    if path.ends_with("/wda/tap") {
+        // 点按走会话作用域的 `wda/tap`，与 `pressButton` 同形。
+        if !path.starts_with("/session/") {
+            return (
+                500,
+                r#"{"value":{"error":"unknown command","message":"Unhandled endpoint"}}"#
+                    .to_owned(),
+            );
+        }
+        return (200, r#"{"value":null}"#.to_owned());
+    }
+    if path.ends_with("/actions") {
+        // W3C `actions` 在真机上可用，但一次点按要 1.50 s（`wda/tap` 是 0.01 s）。
+        // 替身直接拒绝它，这样一旦有人把 `tap()` 改回 `actions`，用例立刻红。
+        // 响应体故意**不含** `invalid session`，且状态码不是 404，所以
+        // `is_invalid_session` 不成立，不会触发会话重建。
+        return (
+            500,
+            r#"{"value":{"error":"unknown command","message":"Unhandled endpoint"}}"#.to_owned(),
+        );
+    }
+    if path.ends_with("/wda/pressButton") {
+        // **只有会话作用域的路径被处理。** 真机（WDA 16.12.8）上顶层
+        // `POST /wda/pressButton` 返回 `unknown command / Unhandled endpoint`，
+        // 替身照抄，这样一旦有人把 `home()` 改回顶层路径，用例立刻红。
+        if !path.starts_with("/session/") {
+            return (
+                500,
+                r#"{"value":{"error":"unknown command","message":"Unhandled endpoint"}}"#
+                    .to_owned(),
+            );
+        }
         return (200, r#"{"value":null}"#.to_owned());
     }
     if path.ends_with("/element/active") {
@@ -339,6 +437,9 @@ fn route(state: &State, method: &str, path: &str, body: &str) -> (u16, String) {
     }
     (500, r#"{"value":{"error":"unknown endpoint"}}"#.to_owned())
 }
+
+/// 主屏时 `activeAppInfo` 回的 bundle id。
+pub const SPRINGBOARD_BUNDLE_ID: &str = "com.apple.springboard";
 
 /// 真机 404 响应体的形状：WDA 把原因放在 `value.error` / `value.message` 里。
 const INVALID_SESSION_BODY: &str =

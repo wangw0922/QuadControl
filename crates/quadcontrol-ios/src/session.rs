@@ -50,8 +50,16 @@ pub const DEFAULT_STATUS_BUDGET: Duration = Duration::from_secs(60);
 /// 进程退出后再给 stderr 抽取线程的收尾时间。
 const STDERR_SETTLE_BUDGET: Duration = Duration::from_millis(200);
 /// MJPEG 默认参数；**只作用在编码器侧**，与设备刷新率无关（红线）。
-pub const MJPEG_FPS: u32 = 15;
-pub const MJPEG_QUALITY: u32 = 50;
+///
+/// 真机实测（iPhone SE 3 + WDA 16.12.8，2026-09-15）：
+/// - `mjpegServerFramerate` 15 / 质量 50 → 约 14 fps，帧约 40 KB；
+/// - `mjpegServerFramerate` 30 / 质量 30 → 约 17 fps，帧约 37 KB（本组取这个）；
+/// - `mjpegScalingFactor` 50 **不提升帧率**，瓶颈在设备端截屏，所以不设缩放。
+///
+/// 也就是说帧率上限由设备截屏能力决定，调高 fps 设置只是把上限让出来，降质量则
+/// 顺带减小帧体积；两项一起改才有 17 fps 这一档。
+pub const MJPEG_FPS: u32 = 30;
+pub const MJPEG_QUALITY: u32 = 30;
 
 /// runwda 早退时的 stderr 关键字分类表。
 ///

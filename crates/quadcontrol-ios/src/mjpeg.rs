@@ -37,9 +37,13 @@
 //!
 //! # 实测帧率基线
 //!
-//! iPhone SE 3（750×1334）、quality 50：单帧约 87 KB，3 秒 41 帧 ≈ 13.7 fps，
-//! 与设置的 [`crate::session::MJPEG_FPS`]（15）基本吻合。**限帧只在编码器侧做，
-//! 与设备刷新率无关**（红线）。
+//! iPhone SE 3（750×1334）。2026-09-14：fps 15 / quality 50，单帧约 87 KB，
+//! 3 秒 41 帧 ≈ 13.7 fps。2026-09-15 重测另三组（帧体积与上一组不同，可能是画面
+//! 内容不同，未核实；两组都按实测保留）：
+//! fps 15 / quality 50 ≈ 14 fps、帧约 40 KB；fps 30 / quality 30 ≈ 17 fps、
+//! 帧约 37 KB（即现在的 [`crate::session::MJPEG_FPS`] / [`crate::session::MJPEG_QUALITY`]）；
+//! `mjpegScalingFactor` 50 不提升帧率——瓶颈在设备端截屏，所以不设缩放。
+//! **限帧只在编码器侧做，与设备刷新率无关**（红线）。
 
 use crate::Error;
 use std::io::{BufRead, BufReader, Read, Write};

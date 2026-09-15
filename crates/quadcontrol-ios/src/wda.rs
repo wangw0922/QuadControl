@@ -34,6 +34,16 @@ pub struct WindowSize {
     pub height: u32,
 }
 
+/// 前台应用信息（`GET /wda/activeAppInfo` 的 `value`）。
+///
+/// 只保留我们真正用得上的两个字段。`name` 不留：真机上它常常是空串，
+/// 应用名走 `ios apps --list`（[`crate::installed_apps`]）更可靠。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveApp {
+    pub bundle_id: String,
+    pub pid: u32,
+}
+
 /// WDA 客户端。克隆代价低（一个 URL、几个共享状态和 ureq 的 Agent），
 /// 监督线程持有一份，GUI 命令层通过 [`crate::session::IosSessionHandle::client`]
 /// 拿到克隆。
@@ -212,39 +222,82 @@ impl Client {
         })
     }
 
-    /// `POST /session/{s}/actions`：W3C pointer 点按，坐标单位是**点**。
+    /// `POST /session/{s}/wda/tap` `{"x":..,"y":..}`：点按，坐标单位是**点**。
+    ///
+    /// **不是 `POST /session/{s}/actions`。** 真机实测（iPhone SE 3 + WDA 16.12.8，
+    /// 2026-09-15）：同一次点按，W3C `actions` 要 **1.50 s**，XCUITest 扩展的
+    /// `wda/tap` 只要 **0.01 s**，效果相同（多次验证生效）。用户反馈的「反应慢」
+    /// 就是 `actions` 这条路径，所以点按一律走 `wda/tap`。
+    ///
+    /// 路径是**会话作用域**的，走 `session_call`，会话被作废时自愈。
     ///
     /// 锁定时不转发：锁屏下点按不会产生效果，却不会报错（静默失败之一）。
     pub fn tap(&self, x_pt: f64, y_pt: f64) -> Result<(), Error> {
         if self.locked()? {
             return Err(Error::DeviceLocked);
         }
-        let body = serde_json::json!({
-            "actions": [{
-                "type": "pointer",
-                "id": "finger1",
-                "parameters": { "pointerType": "touch" },
-                "actions": [
-                    { "type": "pointerMove", "duration": 0, "x": x_pt, "y": y_pt },
-                    { "type": "pointerDown", "button": 0 },
-                    { "type": "pause", "duration": 50 },
-                    { "type": "pointerUp", "button": 0 },
-                ],
-            }],
-        });
+        let body = serde_json::json!({ "x": x_pt, "y": y_pt });
         self.session_call(
-            |session| self.post_raw(&format!("/session/{session}/actions"), &body),
+            |session| self.post_raw(&format!("/session/{session}/wda/tap"), &body),
             Error::WdaSessionFailed,
         )
         .map(|_| ())
     }
 
-    /// `POST /wda/homescreen`：回主屏。这是**顶层**端点，不带 session 段。
+    /// `POST /session/{s}/wda/dragfromtoforduration`：滑动，坐标单位是**点**。
+    ///
+    /// 与 [`Client::tap`] 一致：锁定时不转发（锁屏下滑动不产生效果也不报错）。
+    /// `duration_secs` 钳制在 [`SWIPE_MIN_SECS`]–[`SWIPE_MAX_SECS`]：太短 WDA 会
+    /// 判成点按，太长会顶满 [`REQUEST_TIMEOUT`]。非有限值（NaN/inf）当作最小值——
+    /// `f64::clamp` 会把 NaN 原样传下去。
+    ///
+    /// 端点依据真机验证（iPhone SE 3 + WDA 16.12.8，2026-08）：这条 XCUITest
+    /// 扩展端点可用。
+    pub fn swipe(&self, from: (f64, f64), to: (f64, f64), duration_secs: f64) -> Result<(), Error> {
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
+        let duration = if duration_secs.is_finite() {
+            duration_secs.clamp(SWIPE_MIN_SECS, SWIPE_MAX_SECS)
+        } else {
+            SWIPE_MIN_SECS
+        };
+        let body = serde_json::json!({
+            "fromX": from.0,
+            "fromY": from.1,
+            "toX": to.0,
+            "toY": to.1,
+            "duration": duration,
+        });
+        self.session_call(
+            |session| {
+                self.post_raw(
+                    &format!("/session/{session}/wda/dragfromtoforduration"),
+                    &body,
+                )
+            },
+            Error::WdaSessionFailed,
+        )
+        .map(|_| ())
+    }
+
+    /// `POST /session/{s}/wda/pressButton` `{"name":"home"}`：按 Home 键回主屏。
+    ///
+    /// **不是 `/wda/homescreen`。** 真机实测（iPhone SE 3 + WDA 16.12.8，
+    /// 2026-09-15）：前台已经是 SpringBoard 时——哪怕停在第二屏——`/wda/homescreen`
+    /// 直接返回成功而**不按键**，于是「回到主屏幕」回不到第一页。改用按 Home 键：
+    /// 该端点返回 200 已验证，**回到第一页的效果由本轮真机验收确认**。
+    ///
+    /// 路径是**会话作用域**的：同一台真机上顶层 `POST /wda/pressButton` 返回
+    /// `unknown command / Unhandled endpoint`，只有 `/session/{s}/wda/pressButton`
+    /// 被处理。因此走 `session_call`，会话被作废时自愈。
     pub fn home(&self) -> Result<(), Error> {
-        self.post("/wda/homescreen", &serde_json::json!({}), |e| {
-            Error::WdaSessionFailed(e)
-        })?;
-        Ok(())
+        let body = serde_json::json!({ "name": "home" });
+        self.session_call(
+            |session| self.post_raw(&format!("/session/{session}/wda/pressButton"), &body),
+            Error::WdaSessionFailed,
+        )
+        .map(|_| ())
     }
 
     /// `GET /session/{s}/wda/locked`：锁定状态。
@@ -320,6 +373,64 @@ impl Client {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// `GET /session/{s}/wda/activeAppInfo`：当前**前台**应用。
+    ///
+    /// 这是「最近使用的应用」卡的唯一数据来源。真机实测（iPhone SE 3 +
+    /// WDA 16.12.8，2026-09-15）：**0.24 s** 返回
+    /// `{"value":{"bundleId":..,"pid":..,"name":..}}`。
+    ///
+    /// **为什么不用 `GET /session/{s}/wda/apps/list`**：同一台真机上它只返回
+    /// **前台**那一个应用，列不出后台应用，凑不出「最近使用」。而 iOS 的多任务
+    /// 卡片界面本身从电脑这侧不可达（Home 键机型要双击，一次 XCUITest 按键约
+    /// 0.5 s，凑不出双击窗口；WDA 也没有公开的切换器端点），所以由 GUI 记录
+    /// 本次会话里见过的前台应用，用 [`Client::activate_app`] 切回去。
+    ///
+    /// 锁定时**不**拦截：这只是一次读取，没有会静默失败的写操作。
+    pub fn active_app(&self) -> Result<ActiveApp, Error> {
+        let value = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/wda/activeAppInfo")),
+            Error::WdaSessionFailed,
+        )?;
+        let info = value.get("value").unwrap_or(&value);
+        let bundle_id = info
+            .get("bundleId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Error::WdaSessionFailed("activeAppInfo has no bundleId".into()))?
+            .to_owned();
+        // pid 缺失不值得失败掉整次查询：卡片只认 bundle id。
+        let pid = info
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        Ok(ActiveApp { bundle_id, pid })
+    }
+
+    /// `POST /session/{s}/wda/apps/activate` `{"bundleId":..}`：把应用切到前台。
+    ///
+    /// 真机验证（iPhone SE 3 + WDA 16.12.8，2026-09-15）：有效，把 Chrome 切到了
+    /// 前台。这是「最近使用的应用」卡的写操作。
+    ///
+    /// 与 [`Client::tap`] 一致：**锁定时不转发**。锁屏下启动应用不会产生效果，
+    /// 而我们不想把一个静默失败报成成功。
+    ///
+    /// 非锁定的失败单独给 [`Error::ActivateAppFailed`]：应用被卸载、bundle id
+    /// 写错都会落在这里，用户看到的是「无法切换到该应用」而不是「会话故障」。
+    pub fn activate_app(&self, bundle_id: &str) -> Result<(), Error> {
+        if bundle_id.is_empty() {
+            return Err(Error::ActivateAppFailed("empty bundle id".into()));
+        }
+        if self.locked()? {
+            return Err(Error::DeviceLocked);
+        }
+        let body = serde_json::json!({ "bundleId": bundle_id });
+        self.session_call(
+            |session| self.post_raw(&format!("/session/{session}/wda/apps/activate"), &body),
+            Error::ActivateAppFailed,
+        )
+        .map(|_| ())
     }
 
     /// `GET /screenshot`：返回解码后的 PNG 字节。
@@ -469,6 +580,11 @@ fn is_invalid_session(message: &str) -> bool {
 
 /// 解锁动画的有界等待预算；见 [`Client::wake`]。
 pub const UNLOCK_SETTLE_BUDGET: Duration = Duration::from_secs(2);
+
+/// [`Client::swipe`] 的最短时长（秒）。再短 WDA 会把它判成点按。
+pub const SWIPE_MIN_SECS: f64 = 0.05;
+/// [`Client::swipe`] 的最长时长（秒）。留足余量不顶满 [`REQUEST_TIMEOUT`]。
+pub const SWIPE_MAX_SECS: f64 = 2.0;
 
 /// 从 `element/active` 的响应里取元素 id。
 ///
@@ -630,6 +746,26 @@ mod tests {
         assert_eq!(
             client.window_size().unwrap_err().code(),
             "wda_session_failed"
+        );
+        // `home` 从顶层 `/wda/homescreen` 换成会话作用域的 `pressButton` 之后，
+        // 同样要求先有会话。
+        assert_eq!(client.home().unwrap_err().code(), "wda_session_failed");
+        // 「最近使用的应用」两个端点同样是会话作用域的。
+        assert_eq!(
+            client.active_app().unwrap_err().code(),
+            "wda_session_failed"
+        );
+        assert_eq!(
+            client
+                .activate_app("com.example.REDACTED")
+                .unwrap_err()
+                .code(),
+            "wda_session_failed"
+        );
+        // 空 bundle id 在碰网络之前就被挡住。
+        assert_eq!(
+            client.activate_app("").unwrap_err().code(),
+            "activate_app_failed"
         );
         assert!(client.session_id().is_none());
     }

@@ -42,9 +42,70 @@ fn tap_and_home_reach_the_documented_endpoints() {
     let (server, client) = connected(FakeWdaConfig::healthy());
     client.tap(120.0, 240.0).unwrap();
     client.home().unwrap();
-    assert!(server.saw("POST /session/FAKESESSION/actions"));
-    // 回主屏是**顶层**端点，不带 session 段。
-    assert!(server.saw("POST /wda/homescreen"));
+    // 点按 = 会话作用域的 `wda/tap`，体里是点坐标。真机上 W3C `/actions` 一次要
+    // 1.50 s，`wda/tap` 只要 0.01 s 且效果相同，所以旧端点不再使用。
+    assert!(server.saw("POST /session/FAKESESSION/wda/tap"));
+    assert!(server.saw_body("/wda/tap", r#""x":120.0"#));
+    assert!(server.saw_body("/wda/tap", r#""y":240.0"#));
+    assert!(!server.saw("/actions"));
+    // 回主屏 = 按 Home 键，走**会话作用域**的 pressButton。真机上
+    // `/wda/homescreen` 在前台已是 SpringBoard 时不按键（回不到第一页），
+    // 顶层 `/wda/pressButton` 则是 `unknown command`。
+    assert!(server.saw("POST /session/FAKESESSION/wda/pressButton"));
+    assert!(server.saw_body("/wda/pressButton", r#""home""#));
+    assert!(!server.saw("/wda/homescreen"));
+}
+
+/// 滑动走 `dragfromtoforduration`，两端坐标与时长都按契约进体。
+#[test]
+fn swipe_reaches_the_documented_endpoint_with_both_endpoints_in_the_body() {
+    let (server, client) = connected(FakeWdaConfig::healthy());
+    client.swipe((10.0, 500.0), (10.0, 100.0), 0.3).unwrap();
+    assert!(server.saw("POST /session/FAKESESSION/wda/dragfromtoforduration"));
+    for field in [
+        r#""fromX":10"#,
+        r#""fromY":500"#,
+        r#""toX":10"#,
+        r#""toY":100"#,
+    ] {
+        assert!(
+            server.saw_body("/wda/dragfromtoforduration", field),
+            "{field}"
+        );
+    }
+}
+
+/// 时长钳制在 0.05–2.0 s；非有限值当最小值（`f64::clamp` 会把 NaN 传下去）。
+#[test]
+fn swipe_clamps_its_duration() {
+    let (server, client) = connected(FakeWdaConfig::healthy());
+    client.swipe((1.0, 1.0), (2.0, 2.0), 0.001).unwrap();
+    assert!(server.saw_body("/wda/dragfromtoforduration", r#""duration":0.05"#));
+    client.swipe((1.0, 1.0), (2.0, 2.0), 99.0).unwrap();
+    assert!(server.saw_body("/wda/dragfromtoforduration", r#""duration":2.0"#));
+    client.swipe((1.0, 1.0), (2.0, 2.0), f64::NAN).unwrap();
+    assert_eq!(
+        server.count("/wda/dragfromtoforduration"),
+        3,
+        "NaN 也应发出请求，而不是崩掉或被丢弃"
+    );
+}
+
+/// 锁定时滑动不转发：与点按同一条理由（锁屏下不产生效果也不报错）。
+#[test]
+fn swipe_is_refused_while_locked() {
+    let (server, client) = connected(FakeWdaConfig {
+        locked: true,
+        ..FakeWdaConfig::healthy()
+    });
+    assert_eq!(
+        client
+            .swipe((1.0, 1.0), (2.0, 2.0), 0.3)
+            .unwrap_err()
+            .code(),
+        "device_locked"
+    );
+    assert!(!server.saw("dragfromtoforduration"));
 }
 
 /// 锁定时点按不转发：真机上锁屏点按不报错也不生效（静默失败）。
@@ -316,4 +377,78 @@ fn concurrent_invalidations_recreate_the_session_only_once() {
         "只该重建一次会话（初次 + 重建）：{:?}",
         server.requests.lock().unwrap()
     );
+}
+
+// ---------------------------------------------------------------------------
+// 「最近使用的应用」：activeAppInfo + apps/activate
+// ---------------------------------------------------------------------------
+
+/// 切过去之后，`activeAppInfo` 报的就是那个应用——「效果核验，不是 HTTP 200」。
+#[test]
+fn activate_app_moves_the_foreground_app_and_active_app_reports_it() {
+    let (server, client) = connected(FakeWdaConfig::healthy());
+    assert_eq!(
+        client.active_app().unwrap().bundle_id,
+        fake_wda::SPRINGBOARD_BUNDLE_ID
+    );
+
+    client.activate_app("com.example.REDACTED.browser").unwrap();
+    let active = client.active_app().unwrap();
+    assert_eq!(active.bundle_id, "com.example.REDACTED.browser");
+    assert_eq!(active.pid, 1234);
+    assert_eq!(server.active_bundle(), "com.example.REDACTED.browser");
+    assert!(server.saw_body("/wda/apps/activate", "com.example.REDACTED.browser"));
+    // 两个端点都必须是会话作用域的。
+    assert!(server.saw("GET /session/FAKESESSION/wda/activeAppInfo"));
+    assert!(server.saw("POST /session/FAKESESSION/wda/apps/activate"));
+}
+
+/// 锁定时**不转发**：锁屏下启动应用不产生效果，照发只会得到一个假的「已切换」。
+#[test]
+fn activate_app_refuses_while_the_device_is_locked() {
+    let (server, client) = connected(FakeWdaConfig {
+        locked: true,
+        ..FakeWdaConfig::healthy()
+    });
+    assert_eq!(
+        client
+            .activate_app("com.example.REDACTED.browser")
+            .unwrap_err()
+            .code(),
+        "device_locked"
+    );
+    assert!(!server.saw("apps/activate"), "锁定时不该发出请求");
+    assert_eq!(server.active_bundle(), fake_wda::SPRINGBOARD_BUNDLE_ID);
+}
+
+/// 非锁定的失败（应用被卸载、bundle id 写错）有自己的码，不是会话故障。
+#[test]
+fn activate_app_failure_maps_to_activate_app_failed() {
+    let (_server, client) = connected(FakeWdaConfig {
+        activate_fails: true,
+        ..FakeWdaConfig::healthy()
+    });
+    assert_eq!(
+        client
+            .activate_app("com.example.REDACTED.gone")
+            .unwrap_err()
+            .code(),
+        "activate_app_failed"
+    );
+}
+
+/// 会话被作废时，两个端点都要自愈（重建 + 重试一次）。
+#[test]
+fn active_app_recreates_an_invalidated_session() {
+    let server = FakeWda::start(FakeWdaConfig {
+        invalidate_after_first_call: true,
+        ..FakeWdaConfig::healthy()
+    });
+    let client = Client::with_base_url(server.base_url());
+    client.create_session().unwrap();
+    assert_eq!(
+        client.active_app().unwrap().bundle_id,
+        fake_wda::SPRINGBOARD_BUNDLE_ID
+    );
+    assert_eq!(server.count_exact("POST /session"), 2);
 }
