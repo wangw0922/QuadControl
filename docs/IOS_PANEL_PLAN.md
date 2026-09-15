@@ -74,9 +74,17 @@ SIGTERM，等 2 s；剩余 SIGKILL）→ 全部 reap。最坏墙钟 5 s + 收尾
 替代方案已核对：前端 `fetch()` 流式解析要放宽 `connect-src`；Tauri 自定义协议不适合
 无限流。
 
-代理行为：accept 循环，**最新下游连接获胜**（新连接到来关闭旧下游；WebKit 对 MJPEG
-会自行重连），上游始终最多一条；按 multipart 边界切帧，单帧上限 4 MiB（超限断流报
-`proxy_failed`）；保留「最新一帧」单槽缓冲，下游慢时覆盖旧帧并计 `backpressure_drops`；
+代理行为：accept 循环，**广播给所有下游**（每条连接一个写线程，互不驱逐），上游始终
+最多一条；按 multipart 边界切帧，单帧上限 4 MiB（超限断流报 `proxy_failed`）；保留
+「最新一帧 + 递增序号」，下游慢时旧帧被覆盖并计 `backpressure_drops`（定义：发布新帧时
+上一帧一个写线程都没取走过；无下游不计）；
+
+> 原契约是「最新下游连接获胜」，依据「WebKit 对 MJPEG 会自行重连」。**真机实测
+> （iPhone SE 3 + macOS WKWebView，2026-09-15）证伪**：用 curl 连一次代理端口做计数，
+> 代理按旧契约关掉了 WebView 那条连接，此后 `<img>` 永远停在最后一帧、**不会重连也不
+> 报错**，而转发端口上的帧是新的。故改为广播、不再踢人；GUI 侧另加一个限流到 2 s 的
+> `error` 兜底重连（WKWebView 在流中途被断开是否触发 `error` 尚未实测）。代价：读停但
+> 不关闭的下游会占住一个写线程直到对端关闭或 `stop()`。
 `FrameStats { frames, backpressure_drops, last_frame_at }` 原子共享。不解码 JPEG、
 不做黑帧检测。**停帧不是锁屏信号**（真机测量：锁屏后截图是合法全黑 PNG、无错误），
 锁定提示只由 `/wda/locked` 驱动。
@@ -97,6 +105,14 @@ SIGTERM，等 2 s；剩余 SIGKILL）→ 全部 reap。最坏墙钟 5 s + 收尾
 | 文字 | `POST /session/{s}/element/active` → `POST /session/{s}/element/{e}/value` → `GET /session/{s}/element/{e}/attribute/value` 回读 | **禁用 `/wda/keys`**（真机：返回成功但不送达）。回读不含发送内容 → `text_unconfirmed`，文案「无法确认已送达，请在手机上核对」（安全输入框回读为空属正常） |
 
 「符号存在 ≠ 可调用 ≠ 真的产生效果」：结果码来自效果核验，不是 HTTP 200。
+
+**会话会被作废，客户端要自愈**（真机 2026-09-15）：另一个客户端对同一台 WDA
+`POST /session` 之后，原 session id 对**任何** session 作用域端点都返回 HTTP 404
+`invalid session id`（WDA 同一时刻只保留一个会话；重启 WDA 同理），当时的表现是
+`send_text` 在第一步 `locked()` 上就报 `wda_session_failed`。故 `Client` 的 session id
+改为共享状态，session 作用域请求撞上「404 + invalid session」时重建会话并**重试一次**
+（只一次），重建后重放 MJPEG 的 fps/quality。`send_text` 取到元素 id 之后的写入与回读
+不重试——元素 id 属于旧会话，硬重试会对着新会话的陌生元素写。
 
 ## 三、代码落点（三个 PR）
 

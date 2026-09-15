@@ -693,6 +693,19 @@ fn attach_mode_runs_without_any_child_process() {
     let client = handle.client().unwrap();
     client.home().unwrap();
 
+    // 会话被别的客户端抢走之后，GUI 命令必须自愈而不是报 `wda_session_failed`。
+    // 真机（2026-09-15）上就是这么炸的：另一个客户端 `POST /session`，此后原
+    // session id 对任何 session 作用域端点都返回 404，`send_text` 在 `locked()`
+    // 这一步就失败，链路却完好。
+    wda.invalidate_session();
+    client.send_text("hello").unwrap();
+    assert_eq!(
+        wda.count_exact("POST /session"),
+        2,
+        "作废后应当重建过一次会话：{:?}",
+        wda.requests.lock().unwrap()
+    );
+
     handle.request_stop().unwrap();
     assert_eq!(
         wait_for_settled(&handle, IOS_SHUTDOWN_DEADLINE),

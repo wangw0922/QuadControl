@@ -11,11 +11,21 @@
 //!
 //! # 行为契约
 //!
-//! - accept 循环，**最新下游连接获胜**（新连接到来就关掉旧的；WebKit 对 MJPEG
-//!   会自行重连）；**上游始终最多一条**，且跨下游重连保持不断。
+//! - accept 循环，**广播给所有下游**：每条下游连接各有一个写线程，互不驱逐。
+//!   **上游始终最多一条**，且跨下游重连保持不断。
+//!
+//!   这条契约原来是「最新下游连接获胜」，依据是「WebKit 对 MJPEG 会自行重连」。
+//!   **真机实测（iPhone SE 3 + macOS WKWebView，2026-09-15）证明那个假设是错的**：
+//!   用 curl 连一次代理端口做计数，代理按旧契约关掉了 WebView 那条连接
+//!   （`lsof` 显示 CLOSED），此后 `<img>` **永远停在最后一帧、不重连也不报错**，
+//!   而转发端口上的帧是新的。所以代理不再踢任何人。
+//!
+//!   代价如实写明：一条**读停了但不关闭**的下游，现在会一直占着一个写线程和一个
+//!   `Arc` 帧引用，直到对端关闭或 [`Proxy::stop`]；旧的驱逐逻辑顺带清掉了这种连接。
 //! - 按 multipart 边界切帧，单帧上限 [`MAX_FRAME_BYTES`]，超限即断流并记
 //!   [`crate::Error::ProxyFailed`]。
-//! - 只保留「最新一帧」单槽缓冲：下游慢时覆盖旧帧并计 `backpressure_drops`。
+//! - 只保留「最新一帧 + 单调递增序号」：下游慢时旧帧被覆盖并计
+//!   `backpressure_drops`（定义见 [`FrameStats::backpressure_drops`]）。
 //!   这是评审阻塞项 B3 的裁决——无界队列会让 `backpressure_drops` 恒零，
 //!   而且把内存压力变成延迟累积。
 //! - **不解码 JPEG，不做黑帧检测。** 停帧不是锁屏信号，锁定提示只由 `/wda/locked`
@@ -60,17 +70,18 @@ const UPSTREAM_CONNECT_BUDGET: Duration = Duration::from_secs(10);
 pub struct FrameStats {
     /// 从上游成功切出的帧数。GUI 的「N 帧/秒」标签由它的差分算出。
     pub frames: u64,
-    /// 下游写得比上游慢、被新帧覆盖掉的旧帧数。
+    /// 背压丢帧数：**发布新帧时，上一帧一个写线程都没取走过**。
+    ///
+    /// 没有任何下游时不计——那是正常空转，不是背压（见 [`Slot::publish`]）。
     pub backpressure_drops: u64,
     /// 最后一帧到达的时刻；一帧都没有时是 None。
     pub last_frame_at: Option<Instant>,
 }
 
-/// 上游/下游共享的单槽最新帧缓冲。
+/// 上游/下游共享的「最新帧 + 单调递增序号」广播槽。
 struct Slot {
-    frame: Mutex<Option<Vec<u8>>>,
+    state: Mutex<SlotState>,
     ready: Condvar,
-    frames: AtomicU64,
     drops: AtomicU64,
     last_frame_at: Mutex<Option<Instant>>,
     stopping: AtomicBool,
@@ -78,48 +89,80 @@ struct Slot {
     writers: AtomicU64,
 }
 
-/// 写线程退出时把 [`Slot::writers`] 减回去，panic 路径也不漏。
+/// 槽内状态。只保留最新一帧，靠 `seq` 让每条下游各自判断「有没有新帧」。
+struct SlotState {
+    /// 最新一帧。用 [`Arc`] 是为了广播给 N 条下游时只复制一个引用计数。
+    frame: Option<Arc<Vec<u8>>>,
+    /// 已发布的帧总数，也是帧序号；从 0 开始，第一帧是 1。
+    seq: u64,
+    /// 当前这一帧有没有被**任何**写线程取走过。[`Slot::publish`] 靠它算背压丢帧。
+    consumed: bool,
+}
+
+/// 写线程退出时把 [`Slot::writers`] 减回去、并把自己的 socket 从注册表里摘掉，
+/// panic 路径也不漏。不摘的话 fd 会随下游的每次重连无限增长。
 struct WriterGuard<'a> {
     slot: &'a Arc<Slot>,
+    sockets: &'a Arc<Mutex<Vec<(u64, TcpStream)>>>,
+    id: u64,
 }
 impl Drop for WriterGuard<'_> {
     fn drop(&mut self) {
         self.slot.writers.fetch_sub(1, Ordering::AcqRel);
+        self.sockets
+            .lock()
+            .expect("sockets mutex poisoned")
+            .retain(|(id, _)| *id != self.id);
     }
 }
 
 impl Slot {
     fn publish(&self, frame: Vec<u8>) {
-        let mut held = self.frame.lock().expect("frame mutex poisoned");
-        // 槽里还压着上一帧 = 有人在消费但没跟上，覆盖并记一次背压丢帧。
+        let mut state = self.state.lock().expect("frame mutex poisoned");
+        // 上一帧**一个写线程都没取走过** = 有人在消费但没跟上，记一次背压丢帧。
         //
         // **没有下游时不计**：`backpressure_drops` 是给「画面卡是因为下游慢」用的
-        // 诊断量。GUI 还没连上来（或用户已断开）时帧当然会在槽里被覆盖，那是正常
-        // 的空转，不是背压；照计只会让这个指标在最常见的场景里虚高到没法用。
-        if held.is_some() && self.writers.load(Ordering::Acquire) > 0 {
+        // 诊断量。GUI 还没连上来（或用户已断开）时帧当然会被覆盖，那是正常的空转，
+        // 不是背压；照计只会让这个指标在最常见的场景里虚高到没法用。
+        //
+        // 广播语义下「被消费」= 至少一条下游读到了；多条下游里只要有一条跟得上就
+        // 不算丢——丢帧要归咎到「所有人都没跟上」，否则一条慢下游会让指标失真。
+        if state.seq > 0 && !state.consumed && self.writers.load(Ordering::Acquire) > 0 {
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
-        *held = Some(frame);
-        self.frames.fetch_add(1, Ordering::Relaxed);
+        state.frame = Some(Arc::new(frame));
+        state.seq += 1;
+        state.consumed = false;
         *self.last_frame_at.lock().expect("instant mutex poisoned") = Some(Instant::now());
         self.ready.notify_all();
     }
 
-    /// 取走最新帧；停止时返回 None。有界等待，绝不无限挂起。
-    fn take(&self) -> Option<Vec<u8>> {
-        let mut held = self.frame.lock().expect("frame mutex poisoned");
+    /// 已发布的帧总数（= 当前帧序号）。
+    fn frames(&self) -> u64 {
+        self.state.lock().expect("frame mutex poisoned").seq
+    }
+
+    /// 等到比 `last_seq` 新的一帧并返回它的引用；停止时返回 None。
+    ///
+    /// 有界等待（100 ms 轮一次停止标志），绝不无限挂起。写线程的 `last_seq` 从 0
+    /// 起，而第一帧的序号是 1，所以**新连上的下游立刻拿到当前最新帧**，不用等下
+    /// 一帧才有画面可画。
+    fn next_frame(&self, last_seq: &mut u64) -> Option<Arc<Vec<u8>>> {
+        let mut state = self.state.lock().expect("frame mutex poisoned");
         loop {
             if self.stopping.load(Ordering::Acquire) {
                 return None;
             }
-            if let Some(frame) = held.take() {
-                return Some(frame);
+            if state.seq > *last_seq {
+                *last_seq = state.seq;
+                state.consumed = true;
+                return state.frame.clone();
             }
             let (next, _) = self
                 .ready
-                .wait_timeout(held, Duration::from_millis(100))
+                .wait_timeout(state, Duration::from_millis(100))
                 .expect("frame mutex poisoned");
-            held = next;
+            state = next;
         }
     }
 }
@@ -131,16 +174,20 @@ pub struct Proxy {
     local_port: u16,
     slot: Arc<Slot>,
     failure: Arc<Mutex<Option<String>>>,
-    /// 停止时要 shutdown 的 socket，用来打断阻塞在 read/write 上的线程。
-    sockets: Arc<Mutex<Vec<TcpStream>>>,
+    /// 上游 socket 的一份句柄；`stop()` 用它 shutdown 打断阻塞的读。
+    /// 与下游分开存：下游会来来去去，上游整条代理只有一条。
+    upstream: TcpStream,
+    /// **活跃**下游 socket 的句柄，`(id, socket)`。`stop()` 用它们打断阻塞的写；
+    /// 写线程退出时按 id 摘掉自己（见 [`WriterGuard`]），所以这里不会无限增长。
+    sockets: Arc<Mutex<Vec<(u64, TcpStream)>>>,
     threads: Vec<JoinHandle<()>>,
 }
 
 impl Proxy {
     /// 连上游 `127.0.0.1:<upstream_port>`，在 `127.0.0.1:0` 起下游监听。
     ///
-    /// 上游**在这里连一次**，之后跨下游重连一直保持——WebKit 重连 `<img>` 时
-    /// 不该导致重新拉一条设备侧的流。
+    /// 上游**在这里连一次**，之后跨下游连接的来去一直保持——前端重设 `<img>`
+    /// 的 `src` 时不该导致重新拉一条设备侧的流。
     pub fn start(upstream_port: u16) -> Result<Self, Error> {
         Self::start_with_connect_budget(upstream_port, UPSTREAM_CONNECT_BUDGET)
     }
@@ -163,18 +210,22 @@ impl Proxy {
         let upstream = connect_upstream(upstream_port, connect_budget)?;
 
         let slot = Arc::new(Slot {
-            frame: Mutex::new(None),
+            state: Mutex::new(SlotState {
+                frame: None,
+                seq: 0,
+                consumed: false,
+            }),
             ready: Condvar::new(),
-            frames: AtomicU64::new(0),
             drops: AtomicU64::new(0),
             last_frame_at: Mutex::new(None),
             stopping: AtomicBool::new(false),
             writers: AtomicU64::new(0),
         });
         let failure = Arc::new(Mutex::new(None));
-        let sockets = Arc::new(Mutex::new(vec![upstream.try_clone().map_err(|e| {
-            Error::ProxyFailed(format!("MJPEG upstream clone failed: {e}"))
-        })?]));
+        let upstream_handle = upstream
+            .try_clone()
+            .map_err(|e| Error::ProxyFailed(format!("MJPEG upstream clone failed: {e}")))?;
+        let sockets = Arc::new(Mutex::new(Vec::new()));
 
         let mut threads = Vec::new();
         threads.push({
@@ -192,6 +243,7 @@ impl Proxy {
             local_port,
             slot,
             failure,
+            upstream: upstream_handle,
             sockets,
             threads,
         })
@@ -205,7 +257,7 @@ impl Proxy {
     /// 当前计数快照。
     pub fn stats(&self) -> FrameStats {
         FrameStats {
-            frames: self.slot.frames.load(Ordering::Relaxed),
+            frames: self.slot.frames(),
             backpressure_drops: self.slot.drops.load(Ordering::Relaxed),
             last_frame_at: *self
                 .slot
@@ -246,8 +298,14 @@ impl Proxy {
     pub fn stop(&mut self) {
         self.slot.stopping.store(true, Ordering::Release);
         self.slot.ready.notify_all();
-        for socket in self.sockets.lock().expect("sockets mutex poisoned").iter() {
-            let _ = socket.shutdown(Shutdown::Both);
+        let _ = self.upstream.shutdown(Shutdown::Both);
+        // 作用域刻意收紧：写线程退出时也要锁 `sockets` 把自己摘掉，join 时还握着
+        // 这把锁就是死锁。
+        {
+            let held = self.sockets.lock().expect("sockets mutex poisoned");
+            for (_, socket) in held.iter() {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
         }
         let deadline = Instant::now() + JOIN_BUDGET;
         for thread in self.threads.drain(..) {
@@ -304,7 +362,7 @@ fn connect_upstream(port: u16, budget: Duration) -> Result<TcpStream, Error> {
 /// 「已连接 · 0 帧/秒」——典型的「连上了 ≠ 真的产生效果」。
 const UPSTREAM_REQUEST: &str = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
 
-/// 读上游、切帧、投进单槽。
+/// 读上游、切帧、发布到广播槽。
 fn pump_upstream(stream: TcpStream, slot: &Arc<Slot>, failure: &Arc<Mutex<Option<String>>>) {
     // 先发请求再读：不发的话上游一个字节都不会给（见 [`UPSTREAM_REQUEST`]）。
     if let Err(error) = request_stream(&stream) {
@@ -498,9 +556,16 @@ fn read_line_opt(reader: &mut BufReader<TcpStream>) -> Result<Option<String>, St
     }
 }
 
-/// accept 循环：最新下游连接获胜。
-fn serve_downstream(listener: TcpListener, slot: &Arc<Slot>, sockets: &Arc<Mutex<Vec<TcpStream>>>) {
-    let mut current: Option<TcpStream> = None;
+/// accept 循环：**每条下游各起一个写线程，谁也不驱逐谁**。
+///
+/// 旧实现是「最新连接获胜」，真机上被证伪：WKWebView 的 `<img>` 被踢掉之后不会
+/// 重连，画面就此冻住（见模块文档）。
+fn serve_downstream(
+    listener: TcpListener,
+    slot: &Arc<Slot>,
+    sockets: &Arc<Mutex<Vec<(u64, TcpStream)>>>,
+) {
+    let mut next_id: u64 = 0;
     while !slot.stopping.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -511,36 +576,24 @@ fn serve_downstream(listener: TcpListener, slot: &Arc<Slot>, sockets: &Arc<Mutex
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                // 新连接获胜：先把旧的踢掉，保证同一时刻只有一条下游在写。
-                if let Some(previous) = current.take() {
-                    let _ = previous.shutdown(Shutdown::Both);
-                }
-                // 需要三份句柄：一份给 `sockets`（stop() 用它 shutdown 打断阻塞的
-                // 写），一份留在 `current`（下一次 accept 时踢掉它），一份交给写
-                // 线程。克隆不了就放弃这条连接——WebKit 会自己重连。
+                // 两份句柄：一份进 `sockets`（`stop()` 用它 shutdown 打断阻塞的写），
+                // 一份交给写线程。克隆不了就放弃这条连接。
                 let Ok(for_sockets) = stream.try_clone() else {
                     continue;
                 };
-                let Ok(for_writer) = stream.try_clone() else {
-                    continue;
-                };
-                // `sockets` 只保留 [上游, 当前下游]：旧下游已经 shutdown，
-                // 再留着句柄只会让 fd 随 WebKit 的每次重连无限增长。
-                {
-                    let mut held = sockets.lock().expect("sockets mutex poisoned");
-                    held.truncate(1);
-                    held.push(for_sockets);
-                }
-                current = Some(stream);
+                let id = next_id;
+                next_id += 1;
+                sockets
+                    .lock()
+                    .expect("sockets mutex poisoned")
+                    .push((id, for_sockets));
                 let slot = Arc::clone(slot);
-                thread::spawn(move || write_downstream(for_writer, &slot));
+                let sockets = Arc::clone(sockets);
+                thread::spawn(move || write_downstream(stream, &slot, &sockets, id));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(ACCEPT_POLL),
             Err(_) => return,
         }
-    }
-    if let Some(previous) = current.take() {
-        let _ = previous.shutdown(Shutdown::Both);
     }
 }
 
@@ -549,11 +602,17 @@ fn serve_downstream(listener: TcpListener, slot: &Arc<Slot>, sockets: &Arc<Mutex
 /// **写线程死亡 = 连接关闭**：每一条提前 return 的路径都先 `shutdown(Both)`。
 /// 否则这条 socket 会留在「已建立但永远没人写」的状态，下游读方既拿不到帧也等不到
 /// EOF，只能一直挂着——对 WebKit 来说就是一张永不刷新、也不报错的空白图。
-fn write_downstream(mut stream: TcpStream, slot: &Arc<Slot>) {
+fn write_downstream(
+    mut stream: TcpStream,
+    slot: &Arc<Slot>,
+    sockets: &Arc<Mutex<Vec<(u64, TcpStream)>>>,
+    id: u64,
+) {
     // 活跃写线程计数：`publish` 靠它判断「有没有人在消费」，没有下游时不该把
-    // 压在槽里的帧记成背压丢帧（见 [`Slot::publish`]）。
+    // 被覆盖的帧记成背压丢帧（见 [`Slot::publish`]）。守卫同时负责把这条 socket
+    // 从 `sockets` 里摘掉。
     slot.writers.fetch_add(1, Ordering::AcqRel);
-    let _guard = WriterGuard { slot };
+    let _guard = WriterGuard { slot, sockets, id };
 
     // WebKit 会发一个真正的 GET，先把请求行和头读掉再回响应，否则它会挂在那。
     {
@@ -588,7 +647,9 @@ fn write_downstream(mut stream: TcpStream, slot: &Arc<Slot>) {
         return;
     }
 
-    while let Some(frame) = slot.take() {
+    // 从 0 起：第一帧序号是 1，所以一连上就能拿到当前最新帧。
+    let mut last_seq = 0u64;
+    while let Some(frame) = slot.next_frame(&mut last_seq) {
         let part = format!(
             "--{DOWNSTREAM_BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
             frame.len()

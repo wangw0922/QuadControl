@@ -12,6 +12,7 @@
 
 use crate::Error;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 单次请求超时。
@@ -33,13 +34,30 @@ pub struct WindowSize {
     pub height: u32,
 }
 
-/// WDA 客户端。克隆代价低（只有一个 URL、一个可选 session id 和 ureq 的 Agent），
+/// WDA 客户端。克隆代价低（一个 URL、几个共享状态和 ureq 的 Agent），
 /// 监督线程持有一份，GUI 命令层通过 [`crate::session::IosSessionHandle::client`]
 /// 拿到克隆。
+///
+/// # 会话被作废时自愈
+///
+/// **真机实测（iPhone SE 3 + WDA 16.12.8，2026-09-15）**：另一个客户端对同一台
+/// WDA `POST /session` 之后，原来的 session id 对**任何** session 作用域端点都返回
+/// HTTP 404 `invalid session id`；WDA 同一时刻只保留一个会话，重启 WDA 也一样。
+/// 当时的表现是 `send_text` 在第一步 `locked()` 上就以 `wda_session_failed` 失败，
+/// 而链路其实完好——用户只能重开会话。
+///
+/// 所以每个 session 作用域请求撞上「404 + invalid session」时，会
+/// [`Client::create_session`] 一次并**重试该请求一次**（只一次，避免打转），重建后
+/// 重放记下的 MJPEG 设置。`session_id` 与 MJPEG 设置因此必须共享而不是各克隆一份：
+/// 监督线程和 GUI 命令层看到的必须是同一个会话。
 #[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
-    session_id: Option<String>,
+    session_id: Arc<Mutex<Option<String>>>,
+    /// 会话重建后要重放的 `(fps, quality)`；没配置过就是 None。
+    mjpeg: Arc<Mutex<Option<(u32, u32)>>>,
+    /// 把重建串行化，见 [`Client::recreate_session_unless_replaced`]。
+    recreate_lock: Arc<Mutex<()>>,
     agent: ureq::Agent,
 }
 
@@ -53,20 +71,78 @@ impl Client {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            session_id: None,
+            session_id: Arc::new(Mutex::new(None)),
+            mjpeg: Arc::new(Mutex::new(None)),
+            recreate_lock: Arc::new(Mutex::new(())),
             agent: ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build(),
         }
     }
 
     /// 当前 session id；[`Client::create_session`] 之前是 None。
-    pub fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
+    ///
+    /// 返回拥有所有权的 `String`：会话可能被后台重建，借出去的引用会立刻过期。
+    pub fn session_id(&self) -> Option<String> {
+        self.session_id
+            .lock()
+            .expect("session mutex poisoned")
+            .clone()
     }
 
-    fn session(&self) -> Result<&str, Error> {
-        self.session_id
-            .as_deref()
+    fn session(&self) -> Result<String, Error> {
+        self.session_id()
             .ok_or_else(|| Error::WdaSessionFailed("no WDA session has been created".into()))
+    }
+
+    /// 发一个 session 作用域请求；撞上「会话已被作废」就重建会话并**重试一次**。
+    ///
+    /// `call` 拿到的是当次要用的 session id，返回未包装的失败文案（判据要看原文）。
+    /// 只重试一次：重建后还是 404 说明不是作废问题，再试下去只会打转。
+    fn session_call<T>(
+        &self,
+        call: impl Fn(&str) -> Result<T, String>,
+        wrap: impl Fn(String) -> Error,
+    ) -> Result<T, Error> {
+        let session = self.session()?;
+        match call(&session) {
+            Ok(value) => Ok(value),
+            Err(message) if is_invalid_session(&message) => {
+                self.recreate_session_unless_replaced(&session)?;
+                call(&self.session()?).map_err(wrap)
+            }
+            Err(message) => Err(wrap(message)),
+        }
+    }
+
+    /// 串行化的重建：只有当会话**仍是**那个作废的 `stale` 时才真的重建。
+    ///
+    /// WDA 重启时所有在飞的 session 调用会**同时**吃 404——1 秒一次的状态轮询
+    /// （`window_size` + `locked`）和用户命令分别持有 `Client` 的克隆。不串行化的话
+    /// 两边都会 `POST /session`，而 WDA 只留最后一个，先建的那条紧接着又 404；
+    /// 因为只重试一次，它会以 `wda_session_failed` 收场——正是本机制要消灭的错误。
+    ///
+    /// 锁只跨「建会话 + 重放设置」两次 HTTP 调用，各自受 [`REQUEST_TIMEOUT`] 约束，
+    /// 等待有界。
+    fn recreate_session_unless_replaced(&self, stale: &str) -> Result<(), Error> {
+        let _serial = self.recreate_lock.lock().expect("recreate mutex poisoned");
+        if self.session()? != stale {
+            // 别的克隆已经重建过了，直接拿新 id 去重试。
+            return Ok(());
+        }
+        self.recreate_session()
+    }
+
+    /// 重建会话，并把记下的 MJPEG 设置重放上去。
+    ///
+    /// 重放用的是**不重试**的底层调用：重建路径上再触发一次重建就是递归。
+    fn recreate_session(&self) -> Result<(), Error> {
+        self.create_session()?;
+        let settings = *self.mjpeg.lock().expect("mjpeg mutex poisoned");
+        if let Some((fps, quality)) = settings {
+            let session = self.session()?;
+            self.configure_mjpeg_once(&session, fps, quality)
+                .map_err(Error::WdaSessionFailed)?;
+        }
+        Ok(())
     }
 
     /// `GET /status`：就绪探测。起 WDA 后由调用方轮询。
@@ -75,7 +151,9 @@ impl Client {
     }
 
     /// `POST /session`：建会话并记下 session id。
-    pub fn create_session(&mut self) -> Result<String, Error> {
+    ///
+    /// 取 `&self`：session id 是共享状态，重建路径要能在克隆出去的客户端上调用。
+    pub fn create_session(&self) -> Result<String, Error> {
         let body = serde_json::json!({ "capabilities": { "alwaysMatch": {} } });
         let value = self.post("/session", &body, Error::WdaSessionFailed)?;
         // WDA 把 sessionId 放在顶层或 value 里，两种形状都见过。
@@ -85,7 +163,7 @@ impl Client {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| Error::WdaSessionFailed("WDA response has no sessionId".into()))?
             .to_owned();
-        self.session_id = Some(id.clone());
+        *self.session_id.lock().expect("session mutex poisoned") = Some(id.clone());
         Ok(id)
     }
 
@@ -93,22 +171,35 @@ impl Client {
     ///
     /// **这只作用在编码器侧**，与设备刷新率毫无关系——红线明令绝不修改设备
     /// 显示刷新率，本库没有也不会有任何刷新率参数。
+    ///
+    /// 参数会被记下来：会话若被作废并重建，这些设置要重放，否则新会话的 MJPEG
+    /// 会退回 WDA 的默认帧率与画质。
     pub fn configure_mjpeg(&self, fps: u32, quality: u32) -> Result<(), Error> {
-        let path = format!("/session/{}/appium/settings", self.session()?);
+        *self.mjpeg.lock().expect("mjpeg mutex poisoned") = Some((fps, quality));
+        self.session_call(
+            |session| self.configure_mjpeg_once(session, fps, quality),
+            Error::WdaSessionFailed,
+        )
+    }
+
+    /// 单次 `appium/settings` 调用，不带重试；[`Client::recreate_session`] 也用它。
+    fn configure_mjpeg_once(&self, session: &str, fps: u32, quality: u32) -> Result<(), String> {
+        let path = format!("/session/{session}/appium/settings");
         let body = serde_json::json!({
             "settings": {
                 "mjpegServerFramerate": fps,
                 "mjpegServerScreenshotQuality": quality,
             }
         });
-        self.post(&path, &body, Error::WdaSessionFailed)?;
-        Ok(())
+        self.post_raw(&path, &body).map(|_| ())
     }
 
     /// `GET /session/{s}/window/size`：旋转会改变它，调用方按状态轮询刷新。
     pub fn window_size(&self) -> Result<WindowSize, Error> {
-        let path = format!("/session/{}/window/size", self.session()?);
-        let value = self.get(&path, Error::WdaSessionFailed)?;
+        let value = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/window/size")),
+            Error::WdaSessionFailed,
+        )?;
         let size = value.get("value").unwrap_or(&value);
         let field = |name: &str| {
             size.get(name)
@@ -128,7 +219,6 @@ impl Client {
         if self.locked()? {
             return Err(Error::DeviceLocked);
         }
-        let path = format!("/session/{}/actions", self.session()?);
         let body = serde_json::json!({
             "actions": [{
                 "type": "pointer",
@@ -142,8 +232,11 @@ impl Client {
                 ],
             }],
         });
-        self.post(&path, &body, Error::WdaSessionFailed)?;
-        Ok(())
+        self.session_call(
+            |session| self.post_raw(&format!("/session/{session}/actions"), &body),
+            Error::WdaSessionFailed,
+        )
+        .map(|_| ())
     }
 
     /// `POST /wda/homescreen`：回主屏。这是**顶层**端点，不带 session 段。
@@ -159,8 +252,10 @@ impl Client {
     /// 这是**唯一**的锁定判据。停帧、黑屏都不是锁屏信号：真机测过，锁屏后截图
     /// 返回的是合法的全黑 PNG，没有任何错误。
     pub fn locked(&self) -> Result<bool, Error> {
-        let path = format!("/session/{}/wda/locked", self.session()?);
-        let value = self.get(&path, Error::WdaSessionFailed)?;
+        let value = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/wda/locked")),
+            Error::WdaSessionFailed,
+        )?;
         value
             .get("value")
             .and_then(serde_json::Value::as_bool)
@@ -202,6 +297,9 @@ impl Client {
         let unlock = agent
             .post(&format!("{}{path}", self.base_url))
             .send_json(serde_json::json!({}));
+        // unlock 不走 `session_call`：它本来就把「失败」交给 `locked()` 裁决，而
+        // `locked()` 自己会在会话被作废时重建并重试，重建后下面那一轮轮询就落在
+        // 新会话上。会话作废的情形里屏幕根本没被碰过，重发一次 unlock 没有意义。
         if unlock.is_err() {
             // 失败不代表没效果：屏幕通常已经亮了，只是停在密码页。让 `locked()`
             // 来裁决，而不是把一个预期内的 500 报成会话故障。
@@ -271,18 +369,23 @@ impl Client {
         if self.locked()? {
             return Err(Error::DeviceLocked);
         }
-        let session = self.session()?;
         // GET，不是 POST：见本函数的文档。WDA 对无聚焦元素回 `nosuchelement`，
         // 那不是故障，是「请先点进一个输入框」。
-        let active = self.get(&format!("/session/{session}/element/active"), |message| {
-            if message.contains("nosuchelement") {
-                Error::NoActiveElement
-            } else {
-                Error::WdaSessionFailed(message)
-            }
-        })?;
+        let active = self.session_call(
+            |session| self.get_raw(&format!("/session/{session}/element/active")),
+            |message| {
+                if message.contains("nosuchelement") {
+                    Error::NoActiveElement
+                } else {
+                    Error::WdaSessionFailed(message)
+                }
+            },
+        )?;
         let element = element_id(&active).ok_or(Error::NoActiveElement)?;
-
+        // 元素 id 属于取到它的那个会话，所以写入与回读**不再重建会话**：真在这中间
+        // 被作废了，重建后这个 id 已经没有意义，硬重试只会对着新会话的陌生元素写。
+        // 那种情况如实报 `wda_session_failed`，用户重发一次就落在新会话上。
+        let session = self.session()?;
         self.post(
             &format!("/session/{session}/element/{element}/value"),
             &serde_json::json!({ "value": [text] }),
@@ -320,12 +423,7 @@ impl Client {
     }
 
     fn get(&self, path: &str, wrap: impl Fn(String) -> Error) -> Result<serde_json::Value, Error> {
-        let response = self
-            .agent
-            .get(&format!("{}{path}", self.base_url))
-            .call()
-            .map_err(|e| wrap(describe(path, e)))?;
-        read_json(response, path, &wrap)
+        self.get_raw(path).map_err(wrap)
     }
 
     fn post(
@@ -334,13 +432,39 @@ impl Client {
         body: &serde_json::Value,
         wrap: impl Fn(String) -> Error,
     ) -> Result<serde_json::Value, Error> {
+        self.post_raw(path, body).map_err(wrap)
+    }
+
+    /// 未包装的 GET：失败文案原样返回，好让 [`is_invalid_session`] 看原文判断。
+    fn get_raw(&self, path: &str) -> Result<serde_json::Value, String> {
+        let response = self
+            .agent
+            .get(&format!("{}{path}", self.base_url))
+            .call()
+            .map_err(|e| describe(path, e))?;
+        read_json_raw(response, path)
+    }
+
+    /// 未包装的 POST；见 [`Client::get_raw`]。
+    fn post_raw(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         let response = self
             .agent
             .post(&format!("{}{path}", self.base_url))
             .send_json(body.clone())
-            .map_err(|e| wrap(describe(path, e)))?;
-        read_json(response, path, &wrap)
+            .map_err(|e| describe(path, e))?;
+        read_json_raw(response, path)
     }
+}
+
+/// 这条失败文案是不是「会话已被作废」。
+///
+/// 真机上的形状是 HTTP 404 + 响应体里的 `invalid session id`；WDA 各版本也写过
+/// `Session does not exist`，两种都认。必须同时看 404：别的端点的响应体里出现
+/// 同样的字样时不该触发重建。
+fn is_invalid_session(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("returned 404")
+        && (lower.contains("invalid session") || lower.contains("session does not exist"))
 }
 
 /// 解锁动画的有界等待预算；见 [`Client::wake`]。
@@ -383,27 +507,22 @@ fn describe(path: &str, error: ureq::Error) -> String {
 ///
 /// 多读一个字节来判断是否**超**限：`take(n)` 读满 n 字节时无法区分「正好 n」和
 /// 「被截断」，而截断后的 JSON 解析失败会报成一个误导性的语法错误。
-fn read_json(
-    response: ureq::Response,
-    path: &str,
-    wrap: &impl Fn(String) -> Error,
-) -> Result<serde_json::Value, Error> {
+fn read_json_raw(response: ureq::Response, path: &str) -> Result<serde_json::Value, String> {
     let mut body = Vec::new();
     response
         .into_reader()
         .take(BODY_LIMIT as u64 + 1)
         .read_to_end(&mut body)
-        .map_err(|e| wrap(format!("WDA {path} body could not be read: {e}")))?;
+        .map_err(|e| format!("WDA {path} body could not be read: {e}"))?;
     if body.len() > BODY_LIMIT {
-        return Err(wrap(format!(
+        return Err(format!(
             "WDA {path} response exceeded the {BODY_LIMIT} byte limit"
-        )));
+        ));
     }
     if body.is_empty() {
         return Ok(serde_json::Value::Null);
     }
-    serde_json::from_slice(&body)
-        .map_err(|e| wrap(format!("WDA {path} returned unparsable JSON: {e}")))
+    serde_json::from_slice(&body).map_err(|e| format!("WDA {path} returned unparsable JSON: {e}"))
 }
 
 /// 标准 base64 解码（RFC 4648，带 `=` 填充）。

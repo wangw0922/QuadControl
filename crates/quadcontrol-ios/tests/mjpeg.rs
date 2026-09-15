@@ -276,9 +276,12 @@ fn downstream_reconnects_keep_one_upstream_connection() {
     wait_for_frames(&proxy, before + 1);
 }
 
-/// 最新下游获胜：新连接到来后旧连接被关闭。
+/// 新下游连上**不会**关掉已有的下游（旧契约「最新连接获胜」已被真机证伪）。
+///
+/// 断言是正面的：第二条读到帧之后，第一条还能再读到帧。socket 带 10 s 读超时，
+/// 所以「其实已经被关掉/挂死」会变成一次带行号的失败，而不是无限等待。
 #[test]
-fn newest_downstream_wins() {
+fn a_new_downstream_does_not_evict_the_previous() {
     let (upstream, _, _) = synthetic_upstream(vec![vec![4u8; 1024]], true, true);
     let proxy = Proxy::start(upstream).unwrap();
 
@@ -288,14 +291,59 @@ fn newest_downstream_wins() {
     let mut second = connect_downstream(proxy.local_port());
     assert_eq!(read_one_frame(&mut second), 1024);
 
-    // 旧连接必须在 2 s 内读到**干净的 EOF**（`Ok(0)`）。
-    //
-    // 刻意不接受 `Err(_)`：读超时也是 Err，把它算成「已关闭」等于让「其实没关、
-    // 只是没数据」冒充通过。要的就是 FIN，不是「读不到东西」。
-    drain_until_eof(
-        &mut first,
-        Duration::from_secs(2),
-        "新下游连上后旧连接没有被关闭",
+    assert_eq!(
+        read_one_frame(&mut first),
+        1024,
+        "第二条下游连上之后，第一条不该被踢掉"
+    );
+}
+
+/// 两条下游**同时**各自持续收帧：代理是广播，不是独占。
+#[test]
+fn two_downstreams_both_receive_frames() {
+    let (upstream, _, _) = synthetic_upstream(vec![vec![4u8; 1024]], true, true);
+    let proxy = Proxy::start(upstream).unwrap();
+
+    let mut first = connect_downstream(proxy.local_port());
+    let mut second = connect_downstream(proxy.local_port());
+
+    for round in 0..5 {
+        assert_eq!(read_one_frame(&mut first), 1024, "第一条第 {round} 帧");
+        assert_eq!(read_one_frame(&mut second), 1024, "第二条第 {round} 帧");
+    }
+}
+
+/// 一次「探针」连接（连上、读一帧、断开）不得把已有下游一起带走。
+///
+/// 这正是真机上踩的那一脚：GUI 画面好好的，用 curl 连一次代理端口做计数，旧契约
+/// 就把 WebView 那条连接关了，`<img>` 从此冻在最后一帧、不重连也不报错。
+#[test]
+fn a_probe_connection_does_not_evict_the_first() {
+    let (upstream, _, _) = synthetic_upstream(vec![vec![6u8; 1024]], true, true);
+    let proxy = Proxy::start(upstream).unwrap();
+
+    let mut first = connect_downstream(proxy.local_port());
+    assert_eq!(read_one_frame(&mut first), 1024);
+
+    {
+        let mut probe = connect_downstream(proxy.local_port());
+        assert_eq!(read_one_frame(&mut probe), 1024);
+    } // 探针在这里断开。
+
+    let frames_at_probe_exit = proxy.stats().frames;
+    // 读固定条数而不是「睡 2 秒再看」：读超时把失败变成确定的 panic。
+    for round in 0..5 {
+        assert_eq!(
+            read_one_frame(&mut first),
+            1024,
+            "探针断开后第一条下游停在第 {round} 帧"
+        );
+    }
+    // 而且必须是**新**帧，不是缓冲里攒下的旧帧。
+    assert!(
+        proxy.stats().frames > frames_at_probe_exit,
+        "探针断开后上游没有继续产出新帧：{:?}",
+        proxy.stats()
     );
 }
 

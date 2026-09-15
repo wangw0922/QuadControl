@@ -471,7 +471,7 @@ fn start_session(
     };
 
     // 轮询 `/status`。期间任一子进程早退要立刻分类报错，而不是干等 60 s。
-    let mut client = wda::Client::new(http_port);
+    let client = wda::Client::new(http_port);
     if await_status(&client, children, options.status_budget, stop_rx)? == Readiness::StopRequested
     {
         return Ok(ExitReason::Requested);

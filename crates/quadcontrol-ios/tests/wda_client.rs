@@ -4,10 +4,12 @@ mod fake_wda;
 
 use fake_wda::{FakeWda, FakeWdaConfig};
 use quadcontrol_ios::wda::Client;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 fn connected(config: FakeWdaConfig) -> (FakeWda, Client) {
     let server = FakeWda::start(config);
-    let mut client = Client::with_base_url(server.base_url());
+    let client = Client::with_base_url(server.base_url());
     client.create_session().unwrap();
     (server, client)
 }
@@ -16,7 +18,7 @@ fn connected(config: FakeWdaConfig) -> (FakeWda, Client) {
 fn status_and_session_and_settings_succeed_against_a_healthy_wda() {
     let (server, client) = connected(FakeWdaConfig::healthy());
     client.status().unwrap();
-    assert_eq!(client.session_id(), Some("FAKESESSION"));
+    assert_eq!(client.session_id().as_deref(), Some("FAKESESSION"));
     client.configure_mjpeg(15, 50).unwrap();
     assert_eq!(client.window_size().unwrap().width, 375);
     assert!(server.saw("POST /session/FAKESESSION/appium/settings"));
@@ -28,7 +30,7 @@ fn create_session_failure_maps_to_wda_session_failed() {
         session_fails: true,
         ..FakeWdaConfig::healthy()
     });
-    let mut client = Client::with_base_url(server.base_url());
+    let client = Client::with_base_url(server.base_url());
     assert_eq!(
         client.create_session().unwrap_err().code(),
         "wda_session_failed"
@@ -220,4 +222,98 @@ fn unreachable_wda_reports_its_own_code() {
     };
     let client = Client::new(port);
     assert_eq!(client.status().unwrap_err().code(), "wda_unreachable");
+}
+
+/// 会话被作废后，session 作用域调用要自行重建会话并重试，而不是把故障甩给用户。
+///
+/// 真机（2026-09-15）：另一个客户端 `POST /session` 之后，原 session id 对任何
+/// session 作用域端点都返回 404 `invalid session id`，于是 `send_text` 在第一步
+/// `locked()` 上就报 `wda_session_failed`——链路其实完好，用户却只能重开会话。
+#[test]
+fn session_scoped_calls_recreate_an_invalidated_session() {
+    let server = FakeWda::start(FakeWdaConfig {
+        invalidate_after_first_call: true,
+        ..FakeWdaConfig::healthy()
+    });
+    let client = Client::with_base_url(server.base_url());
+    client.create_session().unwrap();
+
+    // 第一个 session 作用域调用撞上 404：必须**成功**，而不是报错。
+    client.configure_mjpeg(15, 50).unwrap();
+
+    assert_eq!(
+        server.count_exact("POST /session"),
+        2,
+        "应当重建过一次会话：{:?}",
+        server.requests.lock().unwrap()
+    );
+    assert_eq!(
+        client.session_id().as_deref(),
+        Some("FAKESESSION-2"),
+        "客户端应当切到新会话"
+    );
+    // 新会话上必须重放 MJPEG 设置，否则帧率/画质退回 WDA 默认值。
+    assert!(
+        server.count("/session/FAKESESSION-2/appium/settings") >= 2,
+        "重建后既要重放设置、又要重试原请求：{:?}",
+        server.requests.lock().unwrap()
+    );
+
+    // 之后的调用照常走新会话。
+    assert_eq!(client.window_size().unwrap().width, 375);
+    assert!(server.saw("GET /session/FAKESESSION-2/window/size"));
+}
+
+/// 404 但不是「会话作废」的响应不得触发重建（否则任何 404 都会白建一个会话）。
+///
+/// 「没有聚焦元素」按 W3C 就是 404，响应体里没有 `invalid session`——正好把
+/// `is_invalid_session` 的两半判据拆开验一次。
+#[test]
+fn an_unrelated_404_does_not_recreate_the_session() {
+    let (server, client) = connected(FakeWdaConfig {
+        no_active_element: true,
+        ..FakeWdaConfig::healthy()
+    });
+    assert_eq!(
+        client.send_text("hi").unwrap_err().code(),
+        "no_active_element"
+    );
+    assert_eq!(server.count_exact("POST /session"), 1);
+}
+
+/// 两个克隆**同时**撞上作废，只能重建一次会话。
+///
+/// WDA 重启时就是这个形状：1 秒一次的状态轮询和用户命令各持一个克隆，同时吃 404。
+/// 不串行化的话两边都会 `POST /session`，而 WDA 只留最后一个，先建的那条紧接着
+/// 又 404，并且因为只重试一次而以 `wda_session_failed` 收场。
+#[test]
+fn concurrent_invalidations_recreate_the_session_only_once() {
+    let server = FakeWda::start(FakeWdaConfig {
+        invalidate_after_first_call: true,
+        ..FakeWdaConfig::healthy()
+    });
+    let client = Client::with_base_url(server.base_url());
+    client.create_session().unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let client = client.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                client.window_size()
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap().expect("并发重建不该让任何一边失败");
+    }
+
+    assert_eq!(
+        server.count_exact("POST /session"),
+        2,
+        "只该重建一次会话（初次 + 重建）：{:?}",
+        server.requests.lock().unwrap()
+    );
 }

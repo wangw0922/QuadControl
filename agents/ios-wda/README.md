@@ -51,6 +51,9 @@ Numbers below supersede the August ones where they differ.
 | Locked screen, tap | returns success, no effect |
 | `wda/unlock` on a passcode device | blocks **~8 s**, then HTTP 500 `Timed out while waiting until the screen is unlocked`; `/wda/locked` stays true. The screen wakes to the passcode page, which is the intended "wake" behaviour |
 | `/wda/lock` | works; `/wda/locked` reports true within 1 s |
+| Second `POST /session` from any client | **invalidates the previous session**: every session-scoped call on the old id returns 404 `invalid session id` (`Session … was deleted while this request was still pending`). WDA keeps exactly one session; the client must recreate on 404 |
+| WKWebView `<img>` on a closed MJPEG stream | **never reconnects**; the last frame stays on screen with no event we could observe. The proxy must not drop a downstream connection |
+| `ios` cwd side effect | go-ios writes `selfIdentity.plist` (pairing identity incl. a private key) into the **current working directory** of the process that runs it; now git-ignored, and the GUI must run go-ios with a controlled cwd before packaging (P7) |
 
 ## Text input: use setValue, never wda/keys
 

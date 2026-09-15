@@ -356,6 +356,8 @@ let iosStatus = { state: "idle", fps: 0 };
 /// 代价是 WebView 重载会丢掉这个关联（会话仍在后台跑，状态卡照样能断开）。
 let iosSessionDeviceId;
 let iosStreaming = false;
+/// 上一次因 `<img>` 报错而重设 `src` 的时刻；下面的兜底重连靠它限流。
+let iosStreamRetryAt = 0;
 let iosPollInFlight = false;
 
 function iosSessionIsLive(state) {
@@ -731,6 +733,24 @@ function applyIosStatus() {
   iosStagePlaceholder.hidden = iosStreaming;
 }
 
+/// 画面兜底重连。
+///
+/// 真机（iPhone SE 3 + macOS WKWebView，2026-09-15）：代理那条连接一旦被关掉，
+/// `<img>` 就**永远停在最后一帧、不会自动重连**——「WebKit 对 MJPEG 会自行重连」
+/// 的假设不成立。代理已改成广播给所有下游、不再踢人，这里只是兜底：真的断了就
+/// 重设一次 `src`（同 URL 加时间戳防缓存），最多每 2 s 一次。
+///
+/// **如实说明**：WKWebView 在流中途被断开时到底会不会触发 `error`，尚未实测；
+/// 所以这条兜底不能声称一定能救回冻帧的场景。主规则不变：`src` 只在状态迁移时设。
+iosStream.addEventListener("error", () => {
+  // 只在「本来就该在放流」时重连；清空 src 的那一下不该被当成故障。
+  if (!iosStreaming || !iosStatus.proxy_port) return;
+  const now = Date.now();
+  if (now - iosStreamRetryAt < 2000) return;
+  iosStreamRetryAt = now;
+  iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/?t=${now}`;
+});
+
 /// MJPEG 是无限流：`src` **只在状态迁移时**设置或清空。每秒重设会让画面每秒重连。
 function syncIosStream() {
   const device = selectedDevice();
@@ -738,6 +758,7 @@ function syncIosStream() {
   if (shouldStream === iosStreaming) return;
   iosStreaming = shouldStream;
   if (shouldStream) {
+    iosStreamRetryAt = 0;
     iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/`;
   } else {
     iosStream.removeAttribute("src");
