@@ -339,12 +339,10 @@ fn a_probe_connection_does_not_evict_the_first() {
             "探针断开后第一条下游停在第 {round} 帧"
         );
     }
-    // 而且必须是**新**帧，不是缓冲里攒下的旧帧。
-    assert!(
-        proxy.stats().frames > frames_at_probe_exit,
-        "探针断开后上游没有继续产出新帧：{:?}",
-        proxy.stats()
-    );
+    // 而且必须是**新**帧，不是缓冲里攒下的旧帧。有界等待而不是立刻断言：探针期间
+    // 第一条没读，帧攒在内核缓冲里，上面 5 次读可能在微秒级读完，比合成上游的
+    // 5 ms 一帧还快——直接断言就是在和上游时钟赛跑（实测 1/40 偶发）。
+    wait_for_frames(&proxy, frames_at_probe_exit + 1);
 }
 
 /// 在 `budget` 内把流读到干净 EOF（`Ok(0)`）；读超时或出错都算失败。

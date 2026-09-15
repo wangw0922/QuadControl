@@ -421,6 +421,10 @@ struct IosMeta {
     frames: Option<(u64, Instant)>,
     fps: u32,
     window: Option<WindowSize>,
+    /// 上一轮的锁定状态。`wda/unlock` 在有密码的手机上会阻塞约 8 s，WDA 串行
+    /// 处理请求，这期间的 `locked()` 会撞 5 s 超时；若把它降成 None，前端会把
+    /// 锁定条隐藏、文字卡重新可用，等于在唤醒过程中闪成「未锁定」。
+    locked: Option<bool>,
     /// 本次会话里见过的前台应用，**最新在前**，至多 [`RECENT_APPS_LIMIT`] 个。
     recent_apps: Vec<RecentApp>,
     /// bundle id → 显示名，来自一次性的 `ios apps --list`。None = 还没拿到
@@ -893,9 +897,13 @@ async fn ios_session_status(
             *meta = IosMeta::default();
         }
         // 会话自亡（`Exited` / `Failed`）时也要把 UDID 丢掉，不只是显式 stop 的
-        // 那条路——设备标识不该活得比它所属的会话久。
-        if let Ok(mut current) = store.device_id.lock() {
-            *current = None;
+        // 那条路——设备标识不该活得比它所属的会话久。**但 `Starting` 不算**：
+        // 真机上启动要 10–15 s，这里每秒跑一轮，第一轮就清掉的话
+        // `ios apps --list` 永远拿不到 UDID（复审抓到的结构性 bug）。
+        if matches!(dto.state.as_str(), "exited" | "failed") {
+            if let Ok(mut current) = store.device_id.lock() {
+                *current = None;
+            }
         }
         return Ok(dto);
     }
@@ -927,7 +935,16 @@ async fn ios_session_status(
         })
         .await
         .unwrap_or((None, None, None));
-        dto.locked = locked;
+        dto.locked = match locked {
+            Some(value) => {
+                if let Ok(mut meta) = store.meta.lock() {
+                    meta.locked = Some(value);
+                }
+                Some(value)
+            }
+            // 查询超时：沿用上一轮，不把「没查到」升级成「未锁定」。
+            None => store.meta.lock().ok().and_then(|meta| meta.locked),
+        };
         if let Some(window) = window {
             dto.window = Some(WindowDto {
                 width: window.width,
@@ -2003,17 +2020,34 @@ pub fn run() {
         }
         // 最终退出事件：不管前面有没有拦住，这里是最后一道网。同步收回，
         // 因为事件循环马上就要结束，没有「之后」可以等。
-        tauri::RunEvent::Exit if !SHUTDOWN_DONE.swap(true, Ordering::SeqCst) => {
-            eprintln!("exit event; reclaiming sessions synchronously");
-            let timed_out = reclaim_sessions(app_handle);
-            if timed_out > 0 {
-                eprintln!("session shutdown timed out for {timed_out} session(s)");
+        tauri::RunEvent::Exit if !SHUTDOWN_DONE.load(Ordering::SeqCst) => {
+            if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+                // 后台清理（CloseRequested 触发）正在跑，store 已被它 drain：再 reclaim
+                // 一次会立刻空手返回、进程随即退出，后台线程死在梯子中途。有界等它。
+                eprintln!("exit event; waiting for the background shutdown to finish");
+                let deadline = Instant::now() + EXIT_WAIT_BUDGET;
+                while !SHUTDOWN_DONE.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                if !SHUTDOWN_DONE.load(Ordering::SeqCst) {
+                    eprintln!("exit event; background shutdown did not finish in time");
+                }
+            } else {
+                eprintln!("exit event; reclaiming sessions synchronously");
+                let timed_out = reclaim_sessions(app_handle);
+                if timed_out > 0 {
+                    eprintln!("session shutdown timed out for {timed_out} session(s)");
+                }
+                SHUTDOWN_DONE.store(true, Ordering::SeqCst);
+                eprintln!("exit event; sessions reclaimed");
             }
-            eprintln!("exit event; sessions reclaimed");
         }
         _ => {}
     });
 }
+
+/// `Exit` 事件等待后台清理的上限：会话预算 7 s 与配对预算 13 s 取大，再留余量。
+const EXIT_WAIT_BUDGET: Duration = Duration::from_secs(15);
 
 /// 清理只跑一次；完成后置位，让随后的退出事件直接放行。
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);

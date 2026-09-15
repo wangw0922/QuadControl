@@ -109,13 +109,13 @@ Tauri **不发** `ExitRequested`，只挂在那里等于没挂（实测 GUI 1 s 
 | 点按 | `POST /session/{s}/wda/tap` `{"x","y"}` | 会话作用域。**不用 W3C `/actions`**：真机 2026-09-15 同一次点按 `actions` 要 1.50 s，`wda/tap` 只要 0.01 s 且效果相同（用户反馈的「反应慢」即此）。锁定时不转发 |
 | 回主屏 | `POST /session/{s}/wda/pressButton` `{"name":"home"}` | 会话作用域。**不用 `/wda/homescreen`**：真机上前台已是 SpringBoard 时它不按键（停在第二屏就回不到第一页）；顶层 `/wda/pressButton` 回 `unknown command` |
 | 滑动 | `POST /session/{s}/wda/dragfromtoforduration` `{"fromX","fromY","toX","toY","duration"}` | 真机已验证；锁定时不转发；时长钳制 0.05–2 s |
-| 唤醒屏幕 | `POST /session/{s}/wda/unlock` | 公开 XCUITest 操作（Home + 上滑）；有密码停在密码页，由用户自己解锁，绝不发送密码。**未测量**，真机验收补测并回写 README |
+| 唤醒屏幕 | `POST /session/{s}/wda/unlock` | 公开 XCUITest 操作（Home + 上滑）；有密码停在密码页，由用户自己解锁，绝不发送密码。**已测量**（2026-09-15）：有密码时阻塞约 8 s 后 500 并停在密码页 → `device_locked`；刚锁不久的窗口期内直接解锁 |
 | 锁定状态 | `GET /session/{s}/wda/locked` | 驱动「已锁定」提示、禁用文字卡与点按；唤醒的效果核验 = 前后对比 |
 | 前台应用 | `GET /session/{s}/wda/activeAppInfo` | 「最近使用的应用」卡的数据来源。真机 2026-09-15：**0.24 s**，回 `{"value":{"bundleId":..,"pid":..,"name":..}}`（`name` 常为空串）。每 2 轮状态轮询查一次。**不用 `/wda/apps/list`**：真机上它只返回**前台**应用，列不出后台应用 |
 | 切换应用 | `POST /session/{s}/wda/apps/activate` `{"bundleId":..}` | 真机 2026-09-15 **有效**（把 Chrome 切到前台）。锁定时不转发；非锁定的失败 → `activate_app_failed` |
-| 应用名 | `ios apps --list --udid=U` | 每行 `<bundleId> <name…> <version>`，名字可含空格、版本在最后。会话起来后异步跑一次，10 s 预算，只读 stdout（stderr 带 UDID，丢弃）。失败就回退成 bundle id 最后一段 |
+| 应用名 | `ios apps --list --udid=U` | 每行 `<bundleId> <name…> <version>`，名字可含空格、版本在最后（真机 9 行样本核对，2026-09-15）。会话起来后异步跑一次，10 s 预算，只读 stdout（stderr 带 UDID，丢弃）。失败就回退成 bundle id 最后一段 |
 | 截屏 | `GET /screenshot` | base64 PNG → 用户「图片」目录（无则回退 home）`QuadControl-<时间戳>.png`，回传路径 |
-| 文字 | `POST /session/{s}/element/active` → `POST /session/{s}/element/{e}/value` → `GET /session/{s}/element/{e}/attribute/value` 回读 | **禁用 `/wda/keys`**（真机：返回成功但不送达）。回读不含发送内容 → `text_unconfirmed`，文案「无法确认已送达，请在手机上核对」（安全输入框回读为空属正常） |
+| 文字 | `GET /session/{s}/element/active`（POST 在 WDA 16.12.8 未处理）→ `POST /session/{s}/element/{e}/value` → `GET /session/{s}/element/{e}/attribute/value` 回读 | **禁用 `/wda/keys`**（真机：返回成功但不送达）。回读不含发送内容 → `text_unconfirmed`，文案「无法确认已送达，请在手机上核对」（安全输入框回读为空属正常） |
 
 「符号存在 ≠ 可调用 ≠ 真的产生效果」：结果码来自效果核验，不是 HTTP 200。
 
@@ -215,7 +215,7 @@ macOS 宿主 debug 路径）**：
 | 回主屏 | 前台应用回到 springboard |
 | 锁定 | 锁屏后 1 s 内出现「手机已锁定」提示，文字卡禁用；「唤醒屏幕」在无需密码的窗口期内直接解锁，有密码时直连实测停在密码页并报 `device_locked` |
 | 会话自愈 | 第三方 `POST /session` 作废 GUI 会话后，GUI 下一次调用自动重建，无可见故障 |
-| 断开 | 前 2 轮：断开后 go-ios 进程与监听端口在 7 s 内归零；其余轮次见 STATUS |
+| 断开 | 实测 2 轮：断开后 go-ios 进程与监听端口在 7 s 内归零；20 轮未完成 |
 
 真机暴露并已修的缺陷见 [agents/ios-wda/README.md](../agents/ios-wda/README.md) 第二轮
 测量表与 P4.3 提交说明。**未闭环**：macOS 上用 SIGTERM 结束 GUI 会留下 go-ios 子进程
