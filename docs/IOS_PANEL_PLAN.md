@@ -106,7 +106,7 @@ Tauri **不发** `ExitRequested`，只挂在那里等于没挂（实测 GUI 1 s 
 | 建会话 | `POST /session` `{"capabilities":{"alwaysMatch":{}}}` | 取 sessionId |
 | MJPEG 参数 | `POST /session/{s}/appium/settings` `{"settings":{"mjpegServerFramerate":30,"mjpegServerScreenshotQuality":30}}` | 帧率只在编码侧限，与设备刷新率无关。真机 2026-09-15：15/50 ≈ 14 fps、帧约 40 KB；30/30 ≈ 17 fps、帧约 37 KB（取这组）；`mjpegScalingFactor` 50 不提升帧率（瓶颈在设备端截屏），不用 |
 | 窗口尺寸 | `GET /session/{s}/window/size` | 随 1 s 状态轮询刷新（旋转会变） |
-| 点按 | `POST /session/{s}/wda/tap` `{"x","y"}` | 会话作用域。**不用 W3C `/actions`**：真机 2026-09-15 同一次点按 `actions` 要 1.50 s，`wda/tap` 只要 0.01 s 且效果相同（用户反馈的「反应慢」即此）。**2026-09-16 复测未复现**：三个新会话里 `wda/tap` 均为 0.8–1.5 s（见 agents/ios-wda/README.md 第三轮），当前按约 1 s 计。锁定时不转发 |
+| 点按 | `POST /session/{s}/wda/tap` `{"x","y"}` | 会话作用域。**不用 W3C `/actions`**：真机 2026-09-15 同一次点按 `actions` 要 1.50 s，`wda/tap` 只要 0.01 s 且效果相同（用户反馈的「反应慢」即此）。**2026-09-16 复测推翻**：0.01 s 是对失效会话的 404 响应，不是真点按；有效会话里 `wda/tap` 为 0.8–1.5 s，所有 WDA 设置都不能缩短（见 agents/ios-wda/README.md 第三轮），当前按约 1 s 计。锁定时不转发 |
 | 回主屏 | `POST /session/{s}/wda/pressButton` `{"name":"home"}` | 会话作用域。**不用 `/wda/homescreen`**：真机上前台已是 SpringBoard 时它不按键（停在第二屏就回不到第一页）；顶层 `/wda/pressButton` 回 `unknown command` |
 | 滑动 | `POST /session/{s}/wda/dragfromtoforduration` `{"fromX","fromY","toX","toY","duration"}` | 真机已验证；锁定时不转发；时长钳制 0.05–2 s |
 | 唤醒屏幕 | `POST /session/{s}/wda/unlock` | 公开 XCUITest 操作（Home + 上滑）；有密码停在密码页，由用户自己解锁，绝不发送密码。**已测量**（2026-09-15）：有密码时阻塞约 8 s 后 500 并停在密码页 → `device_locked`；刚锁不久的窗口期内直接解锁 |
