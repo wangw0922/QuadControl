@@ -66,6 +66,30 @@ Numbers below supersede the August ones where they differ.
 | WKWebView `<img>` on a closed MJPEG stream | **never reconnects**; the last frame stays on screen with no event we could observe. The proxy must not drop a downstream connection |
 | `ios` cwd side effect | go-ios writes `selfIdentity.plist` (pairing identity incl. a private key) into the **current working directory** of the process that runs it; now git-ignored, and the GUI must run go-ios with a controlled cwd before packaging (P7) |
 
+## Third measurement pass (2026-09-15/16): QuickTime USB screen stream vs WDA MJPEG
+
+Question: can the picture path be replaced by the H.264 stream iOS offers over the
+hidden "QuickTime" USB configuration (the one QuickTime Player and
+`quicktime_video_hack` use), keeping control on WDA? Same iPhone SE 3, iOS 26.5,
+macOS 26.5 host, go-ios 1.2.1.
+
+| Step | Result |
+|---|---|
+| `quicktime_video_hack` (`explore/valeria-wifi-mirroring` branch, 2026-05, gst-free, MIT) `devices` / `activate` | both work: the phone gains a sixth USB configuration; macOS names its vendor interface "Valeria". Deactivation returns the active configuration to 5 but the extra configuration stays listed until replug (documented upstream) |
+| `quicktime_video_hack record` on the macOS host | **blocked by the host**: `USBDeviceOpen: another process has device opened for exclusive access` (the `AppleUSBHostiOSDevice` kernel driver), then `libusb_claim_interface` on interface 2 fails with `IOCreatePlugInInterfaceForService: out of resources`, libusb -99. Same signature as upstream issue #159. Says nothing about Linux or Windows, where no such driver exists; both remain untested |
+| Substitute meter: AVFoundation with `kCMIOHardwarePropertyAllowScreenCaptureDevices` | the phone appears as a muxed "iOS Device" (subtype `isr `). Camera permission is granted per launching app; a probe started from an agent shell is denied without a prompt, so the probe was run from Terminal.app |
+| Stream, 100 s run, idle and swiping | **750×1334, 50.6 fps average, 53.9 fps inside motion windows**; arrival interval median **16.9 ms**, p99 53 ms, max 73 ms; **0 dropped frames**; host-arrival jitter (p99−p1 of wall−PTS) 61 ms. The frame rate stays at 40–57 fps on a static screen. Bitrate not measured: Apple's stack hands over decoded frames, not the H.264 bytes |
+| Send-to-changed-frame latency | `pressButton home` **≤ 0.367 s** to the first frame whose luma differs (the request itself returned after 0.513 s, so the frame arrived before the XCTest call returned). Swipes: 1.44–1.87 s, while the drag request took 2.3–2.75 s. Both are dominated by XCTest executing the gesture; this is **parity** with the 0.33 s MJPEG figure, not an improvement, and the pure video latency cannot be split out without a device-side clock |
+| Capture vs tunnel ordering | starting **or** stopping the capture re-enumerates USB: every live `ios tunnel start --userspace` connection failed at that instant and the WDA runner died with `lost connection to testmanagerd`. Rule: capture first, then tunnel and WDA; after the capture stops, restart both |
+| Side effects on the device | the status bar shows Apple's demo values (9:41, full battery, no carrier) while captured; iOS 26 asked for the device passcode once ("验证以访问 XCTest") when WDA was relaunched after a long idle |
+| `wda/tap` re-timed (2026-09-16, three fresh sessions, home screen and Settings, capture on and off) | **0.81–1.49 s per tap**, `wda/dragfromtoforduration` 1.7–3.1 s, `pressButton home` 0.51 s. The **0.01 s** in the row above did not reproduce; `waitForIdleTimeout` 0 and `animationCoolOffTimeout` 0 change nothing. Treat ~1 s per tap as the current control-side floor until the discrepancy is explained |
+| Windows availability (desk research) | upstream gave up Windows; `chotgpt/quicktime_video_hack_windows` (C++ rewrite, MIT, commits to 2026-03) needs a replacement usbmuxd on port 37015 plus a libusb0 or filter driver that conflicts with Apple's driver |
+
+Conclusion for engine selection: the stream is 2.5–3× the frame rate of the MJPEG path
+at native resolution with no drops, and no worse in latency; the control path (WDA
+gestures at ~1 s) is now the larger part of what a user feels as lag. Adopting the
+stream is a Linux/Windows question that this macOS host cannot answer.
+
 ## Text input: use setValue, never wda/keys
 
 `POST /session/{id}/wda/keys` **returns success and the characters never
