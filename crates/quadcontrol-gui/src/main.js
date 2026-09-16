@@ -673,7 +673,8 @@ function iosViewModel({ status, ownsSelected, guidanceOnly, platform }) {
     locked,
     statusText,
     stageText: running
-      ? text.iosConnected.replace("{fps}", String(status.fps ?? 0))
+      ? text.iosConnected.replace("{fps}", String(status.fps ?? 0)) +
+        (iosDevWda && iosRenderFps !== null ? ` · 渲染 ${iosRenderFps}` : "")
       : statusText,
     actionLabel: isDisconnect ? text.disconnect : text.startControl,
     actionIsDisconnect: isDisconnect,
@@ -776,6 +777,55 @@ iosStream.addEventListener("error", () => {
   iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/?t=${now}`;
 });
 
+/// P4.4 门 1 专用（仅 macOS 开发路径）：在**渲染侧**数帧。每个 rAF 把 `<img>` 画到
+/// 小画布上与上一帧比对，只有像素真的变了才计一帧；每秒把「变化帧/秒」写到帧率
+/// 标签并交给后端打日志。代理的 `frames` 计的是上游切出的帧，反映不了绘制。
+let iosRenderMeter = null;
+let iosRenderFps = null;
+function startIosRenderMeter() {
+  if (!iosDevWda || iosRenderMeter) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = 94;
+  canvas.height = 167;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  let prev = null;
+  let changed = 0;
+  let windowStart = performance.now();
+  let lastFps = 0;
+  const tick = () => {
+    if (!iosStreaming) {
+      iosRenderMeter = null;
+      iosRenderFps = null;
+      return;
+    }
+    try {
+      if (iosStream.naturalWidth > 0) {
+        ctx.drawImage(iosStream, 0, 0, canvas.width, canvas.height);
+        const cur = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        if (prev) {
+          let acc = 0;
+          for (let k = 0; k < cur.length; k += 16) acc += Math.abs(cur[k] - prev[k]);
+          if (acc > 64) changed += 1;
+        }
+        prev = cur;
+      }
+    } catch (error) {
+      window.__TAURI__.core.invoke("ios_dev_render_fps", { fps: 0, note: String(error) }).catch(() => {});
+      prev = null;
+    }
+    const now = performance.now();
+    if (now - windowStart >= 1000) {
+      lastFps = Math.round((changed * 1000) / (now - windowStart));
+      changed = 0;
+      windowStart = now;
+      iosRenderFps = lastFps;
+      window.__TAURI__.core.invoke("ios_dev_render_fps", { fps: lastFps, note: "" }).catch(() => {});
+    }
+    iosRenderMeter = requestAnimationFrame(tick);
+  };
+  iosRenderMeter = requestAnimationFrame(tick);
+}
+
 /// MJPEG 是无限流：`src` **只在状态迁移时**设置或清空。每秒重设会让画面每秒重连。
 function syncIosStream() {
   const device = selectedDevice();
@@ -785,6 +835,7 @@ function syncIosStream() {
   if (shouldStream) {
     iosStreamRetryAt = 0;
     iosStream.src = `http://127.0.0.1:${iosStatus.proxy_port}/`;
+    startIosRenderMeter();
   } else {
     iosStream.removeAttribute("src");
   }
