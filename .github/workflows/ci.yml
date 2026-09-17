@@ -19,9 +19,12 @@ concurrency:
 # PR 只跑 ubuntu；push main 与手动触发跑 ubuntu + macOS。
 # Windows 暂无本地 runner，全矩阵里已移除——Windows 验证（含 G2 Job Object 真机）
 # 仍待 Actions 配额恢复或接入 Windows 主机后补。
+# 仓库公开后，fork 提的 PR 默认不在自托管 runner 上跑（避免陌生代码在本机执行）；
+# 只有源仓库自己分支的 PR、push 到 main、或手动触发才会实际执行 job。
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +62,7 @@ jobs:
 
   gui:
     name: GUI (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
