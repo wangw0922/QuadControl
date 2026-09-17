@@ -16,3 +16,5 @@ DerivedData/
 selfIdentity.plist
 # third-party WebDriverAgent checkout used for real-device acceptance
 /WebDriverAgent/
+# Claude Code session scaffolding (launch.json, agent worktrees) — local only
+/.claude/

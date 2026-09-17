@@ -22,9 +22,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 仓库公开后，fork 提的 PR 默认不在自托管 runner 上跑（避免陌生代码在本机执行）；
+# 只有源仓库自己分支的 PR、push 到 main、或手动触发才会实际执行 job。
 jobs:
   apple:
     name: Apple
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, qc-macos]
     timeout-minutes: 30
     steps:
