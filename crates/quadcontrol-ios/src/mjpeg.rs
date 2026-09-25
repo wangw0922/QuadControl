@@ -642,6 +642,7 @@ fn write_downstream(
 
     let head = format!(
         "HTTP/1.1 200 OK\r\n\
+         Access-Control-Allow-Origin: *\r\n\
          Content-Type: multipart/x-mixed-replace; boundary={DOWNSTREAM_BOUNDARY}\r\n\
          Cache-Control: no-store\r\n\
          Connection: close\r\n\r\n"

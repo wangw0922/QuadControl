@@ -1,6 +1,6 @@
 # P4.4 方案：macOS→iPhone 画面引擎换成 QuickTime USB 屏幕流（提案，评审后修订）
 
-状态：**提案，一轮 Fable 对抗性评审后修订**（2026-09-16；裁决见第七节）。范围只含
+状态：**提案，一轮 Fable 对抗性评审后修订；门 1 已通过**（2026-09-16，用户已确认按此方案做；数据见 [agents/ios-wda/README.md](../agents/ios-wda/README.md)「Gate 1」行：上游 58 fps，渲染侧完全运动的秒里 50–56 变化帧/秒，JPEG 编码 8 ms/帧）。范围只含
 **macOS 宿主 + iPhone**；Windows/Linux 的同类替换（需要 libusb 驱动与替代 usbmuxd）
 不在本片，留待 P6 之后另立方案。事实来源：
 [agents/ios-wda/README.md](../agents/ios-wda/README.md)「Third measurement pass」。
@@ -130,7 +130,7 @@ GUI (Tauri, macOS)
 
 ## 五、验收（真机 iPhone SE 3，macOS 26.5）
 
-1. **门 1，先于全部实现，且在手机重新插拔后**：探针 MJPEG → 现有代理 → `<img>`。
+1. **门 1，先于全部实现，且在手机重新插拔后**（**已通过，2026-09-16**：渲染侧在完全运动的秒里 50–56，见 README；运动源须用主屏拖动，秒表页只送 30 fps）：探针 MJPEG → 现有代理 → `<img>`。
    帧率**在渲染侧取数**：页面里 rAF + canvas `drawImage` 逐帧像素比对，计「变化帧/秒」，
    持续 60 s **≥ 45 fps**；代理的 `frames` 标签只作旁证（它计的是上游切出的帧，WebKit
    再慢也会把 socket 读空，反映不了绘制）。同时记 JPEG 编码每帧耗时。达不到就走门 2

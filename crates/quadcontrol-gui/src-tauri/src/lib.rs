@@ -714,6 +714,17 @@ fn ios_launch_allowed() -> Result<(), String> {
     Ok(())
 }
 
+/// P4.4 门 1 专用：debug 构建且 macOS 开发路径已放行时，
+/// `QUADCONTROL_IOS_ATTACH=<http_port>:<mjpeg_port>` 让 GUI 接到手工起好的链路上。
+fn dev_attach_ports() -> Option<(u16, u16)> {
+    if !cfg!(debug_assertions) || !cfg!(target_os = "macos") || ios_launch_allowed().is_err() {
+        return None;
+    }
+    let raw = std::env::var("QUADCONTROL_IOS_ATTACH").ok()?;
+    let (http, mjpeg) = raw.split_once(':')?;
+    Some((http.trim().parse().ok()?, mjpeg.trim().parse().ok()?))
+}
+
 fn wda_ids_from_env() -> WdaIds {
     let read = |name: &str, fallback: &str| {
         std::env::var(name)
@@ -764,6 +775,15 @@ async fn ios_dev_wda_enabled() -> Result<bool, String> {
     Ok(cfg!(target_os = "macos") && ios_launch_allowed().is_ok())
 }
 
+/// P4.4 门 1 专用：前端渲染侧帧率，只打到本进程 stderr（debug 构建）。
+#[tauri::command]
+async fn ios_dev_render_fps(fps: u32, note: String) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        eprintln!("ios render fps: {fps} {note}");
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn start_ios_session(
     store: tauri::State<'_, IosSessionStore>,
@@ -789,15 +809,21 @@ async fn start_ios_session(
         *session = Some(IosSlot::Starting);
         store.next_id.fetch_add(1, Ordering::Relaxed)
     };
-    // GUI 只起完整链路；`LaunchMode::Attach` 只存在于库与其测试里（方案 §三）。
-    let options = IosLaunchOptions::new(
-        device_id,
-        LaunchMode::Launch {
+    // GUI 默认只起完整链路。`LaunchMode::Attach` 只在 debug 构建 + macOS 开发路径下
+    // 由 `QUADCONTROL_IOS_ATTACH=<http_port>:<mjpeg_port>` 放行，用于 P4.4 门 1：
+    // 手工起好采集探针与 WDA 链路，GUI 只接画面（IOS_MAC_STREAM_PLAN §四）。
+    let mode = match dev_attach_ports() {
+        Some((http_port, mjpeg_port)) => LaunchMode::Attach {
+            http_port,
+            mjpeg_port,
+        },
+        None => LaunchMode::Launch {
             ios: quadcontrol_ios::resolve_ios(None),
             wda: wda_ids_from_env(),
             env: Vec::new(),
         },
-    );
+    };
+    let options = IosLaunchOptions::new(device_id, mode);
     // `spawn_supervised` 会跑 `ios version` 与端口探测（阻塞），不能占着 async
     // 运行时，也不能在持锁期间做。
     let spawned = tauri::async_runtime::spawn_blocking(move || {
@@ -1978,6 +2004,7 @@ pub fn run() {
             sessions,
             host_platform,
             ios_dev_wda_enabled,
+            ios_dev_render_fps,
             start_ios_session,
             stop_ios_session,
             ios_session_status,
